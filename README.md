@@ -21,10 +21,6 @@ This repository provides a modular, standardized framework for querying, cleanin
   # User credentials
   email <- 'person@email.com'
   password <- 'FoundryP@ssword'
-
-  # Access URLs
-  access_url <- 'https://viafoundry.umassmed.edu/vmeta/api/v1/users/login'
-  access_url_base <- 'https://viafoundry.umassmed.edu'
   ```
 - **`constants.R`**  
   Defines global constants such as API URLs, timezones, and regex patterns to be used throughout the pipeline.

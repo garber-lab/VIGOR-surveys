@@ -3,7 +3,7 @@ access_url_base <- 'https://viafoundry.umassmed.edu'
 access_url <- 'https://viafoundry.umassmed.edu/vmeta/api/v1/users/login'
 headers_post <- c('Content-Type' = 'application/json')
 shipments_url <- "/vmeta/api/v1/projectid/667196af25f716a2d9f39248/data/shipments/populated"
-patients_url = "/vmeta/api/v1/projects/vigor_production/data/patient"
+patients_url <- "/vmeta/api/v1/projects/vigor_production/data/patient"
 surveys_url <- "/vmeta/api/v1/projects/vigor_production/data/surveys"
 
 ### Patterns
