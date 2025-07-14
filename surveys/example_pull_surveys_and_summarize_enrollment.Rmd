@@ -30,16 +30,16 @@ library(here)
 
 ```{r set_credentials, include=FALSE}
 #load API credentials from file
-source(str_c(here(), "/credentials.R"))
+source(here::here("credentials.R"))
 
 #load constants
-source(str_c(here(), "/constants.R"))
+source(here::here("constants.R"))
 
 #load querying functions
-source(str_c(here(), "/query_functions.R"))
+source(here::here("query_functions.R"))
 
 #load survey cleaning functions
-source(str_c(here(), "/surveys/survey_functions.R"))
+source(here::here("surveys", "survey_functions.R"))
 ```
 
 ```{r initiate foundry seesion, include=FALSE}
