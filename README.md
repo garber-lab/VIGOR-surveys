@@ -1,4 +1,4 @@
-# vigor_notebooks
+# VIGOR-surveys
 
 # Patient and Survey Data Processing Pipeline
 
