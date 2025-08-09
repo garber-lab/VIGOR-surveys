@@ -4,7 +4,8 @@ library(lubridate)
 #' Find Fitbit HRV Summary and Detail Files for a Date Range
 #' 
 #' Helper function that searches the specified root directory for Fitbit Heart Rate Variability
-#' summary and detail files within a given date range.
+#' summary and detail files within a given date range. For each date, it looks for the summary
+#' file from the previous day to align with the detail file from the current date.
 #' 
 #' @param start_date Date or character. Start date (inclusive) for searching files.
 #' @param end_date Date or character. End date (inclusive) for searching files.
@@ -13,8 +14,8 @@ library(lubridate)
 #' @return A tibble with columns:
 #' \describe{
 #'   \item{file_date}{Date of the files.}
-#'   \item{summary_file}{Full file path to the summary CSV (or NA if missing).}
-#'   \item{detail_file}{Full file path to the detail CSV (or NA if missing).}
+#'   \item{summary_file}{Full file path to the summary CSV from the previous day (or NA if missing).}
+#'   \item{detail_file}{Full file path to the detail CSV from the current date (or NA if missing).}
 #' }
 #' 
 #' @keywords internal
@@ -26,13 +27,16 @@ find_fitbit_hrv_files <- function(start_date, end_date, root_dir) {
   hrv_dir <- file.path(root_dir, "Heart Rate Variability")
   
   files_df <- map_dfr(date_seq, function(d) {
+    # For summary file, look for the previous day's file to align with current day's detail
+    prev_date <- d - days(1)
+    
     summary_file <- list.files(
       path = hrv_dir,
       pattern = paste0(
         "Daily Heart Rate Variability Summary - ",
-        format(d, "%Y-%m"),
+        format(prev_date, "%Y-%m"),
         "\\-\\(",
-        format(d, "%d"),
+        format(prev_date, "%d"),
         "\\)\\.csv$"
       ),
       full.names = TRUE
@@ -61,13 +65,14 @@ find_fitbit_hrv_files <- function(start_date, end_date, root_dir) {
 
 #' Read and Join Fitbit HRV Summary and Detail Files for a Single Date
 #' 
-#' Helper function that reads the summary and detail files for a given date,
-#' joins them by `file_date`, and handles missing files gracefully by returning
-#' rows with `NA`s for missing data.
+#' Helper function that reads the summary file from the previous day and detail file from 
+#' the current date, joins them by `file_date`, and handles missing files gracefully by 
+#' returning rows with `NA`s for missing data. This aligns summary data with detail data 
+#' to correct the one-day offset in Fitbit's HRV reporting.
 #' 
-#' @param file_date Date. The date corresponding to the files to read.
-#' @param summary_file Character or NA. File path to the summary CSV or NA if missing.
-#' @param detail_file Character or NA. File path to the detail CSV or NA if missing.
+#' @param file_date Date. The date corresponding to the detail file to read.
+#' @param summary_file Character or NA. File path to the summary CSV from previous day or NA if missing.
+#' @param detail_file Character or NA. File path to the detail CSV from current date or NA if missing.
 #' @param summary_only Logical. If TRUE, only summary data is returned.
 #' 
 #' @return A tibble containing joined data for the date, with NA-filled rows if files are missing.
@@ -80,27 +85,25 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
   }
   
   if (is.na(summary_file)) {
-    warning("Missing summary file for ", format(file_date, "%Y-%m-%d"))
+    warning("Missing summary file for ", format(file_date - days(1), "%Y-%m-%d"), " (needed for ", format(file_date, "%Y-%m-%d"), ")")
   }
   
   if (is.na(detail_file) && !summary_only) {
     warning("Missing detail file for ", format(file_date, "%Y-%m-%d"))
   }
   
-  # Read summary or create NA tibble, then shift summary timestamps and file_date +1 day
+  # Read summary or create a 1-row tibble with NA values
+  # Note: summary data is from the previous day but joined with current file_date
   summary_df <- if (!is.na(summary_file)) {
     readr::read_csv(summary_file, show_col_types = FALSE) %>%
-      mutate(
-        timestamp = as.POSIXct(timestamp) + lubridate::days(1),
-        file_date = file_date + lubridate::days(1)
-      )
+      mutate(file_date = file_date)
   } else {
     tibble(
       timestamp = as.POSIXct(NA),
       rmssd = NA_real_,
       nremhr = NA_real_,
       entropy = NA_real_,
-      file_date = file_date + lubridate::days(1)
+      file_date = file_date
     )
   }
   
@@ -108,7 +111,7 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
     return(summary_df)
   }
   
-  # Read details or create NA tibble, keep original file_date
+  # Read details or create a 1-row tibble with NA values
   details_df <- if (!is.na(detail_file)) {
     readr::read_csv(detail_file, show_col_types = FALSE) %>%
       mutate(file_date = file_date)
@@ -131,7 +134,9 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
 #' 
 #' Main function to load Fitbit HRV data for a specified date range by reading,
 #' joining, and combining daily summary and detail CSV files. Uses helper functions
-#' to find files and read/join each day’s data. Supports optionally loading only summary data.
+#' to find files and read/join each day's data. Supports optionally loading only summary data.
+#' The function automatically handles the one-day offset by reading summary data from the
+#' previous day to align with detail data from the current date.
 #' 
 #' @param start_date Date or character. Start date (inclusive) of data to load.
 #' @param end_date Date or character. End date (inclusive) of data to load.

@@ -89,6 +89,40 @@ ggplot(mean_detail_compare_plot_df, aes(x = file_date, y = RMSSD, color = Type))
     y = "RMSSD",
     color = "Measure"
   ) +
-  theme_minimal()
+  theme_bw()
+```
+
+```{r plot HRV with box around dates of interest}
+# Example dates to highlight
+highlight_start <- as.Date("2025-07-30")
+highlight_end <- as.Date("2025-08-03")
+
+#add the mean rmssd from the detailed HRV information
+data <- data %>%
+  group_by(file_date) %>%
+  mutate(mean_rmssd_detail = mean(rmssd_detail)) %>%
+  ungroup()
+
+ggplot(data, aes(x = file_date, y = mean_rmssd_detail)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "blue", size = 2) +
+  
+  # Highlight date range with a transparent rectangle
+  annotate(
+    "rect",
+    xmin = highlight_start, xmax = highlight_end,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2, fill = "orange"
+  ) +
+  
+  labs(
+    title = "HRV Over Time with Highlighted Date Range",
+    x = "Date",
+    y = "HRV (Mean RMSSD Detail)"
+  ) +
+  
+  theme_bw()
+
+
 ```
 
