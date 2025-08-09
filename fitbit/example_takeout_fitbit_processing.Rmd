@@ -15,34 +15,29 @@ library(kableExtra)
 library(pander)
 ```
 
-## Load Packages
+## Load Packages and Setup Functions and Constants
 
 ```{r packages}
 library(here)
 library(tidyverse)
 ```
 
-
 ```{r functions}
 source(here::here("fitbit/takeout_fitbit_processing_functions.R"))
 ```
 
-\newpage
-
-# Explore some FitBit data
 ```{r data path}
 #current path
 data_path <- here::here("fitbit/sample_fitbit_takeout_data/9Aug25_groberts_fitbit_takeout/Fitbit")
 print(data_path)
 ```
-
+\newpage
+# Explore some FitBit data
 ```{r constants}
 #define some constants for the nb
 start_date="2025-07-07"
 end_date="2025-08-09"
 ```
-
-
 
 ## Heart Rate Variablility
 ```{r load hrv data}
@@ -58,9 +53,10 @@ summary_only <- load_fitbit_hrv(start_date = start_date,
                                root_dir = data_path,
                                summary_only = TRUE)
 
-pander(head(data))
+pander(sample_n(data, 5))
 ```
 
+\newpage
 Here, I want to know if the `rmssd_summary` from the summary HRV files is simply
 the mean across all of the "detail" datapoints for that day. The plot below
 suggests they are not the same, but they are closely related.
@@ -91,11 +87,12 @@ ggplot(mean_detail_compare_plot_df, aes(x = file_date, y = RMSSD, color = Type))
   ) +
   theme_bw()
 ```
-
+\newpage
+The plot below shows how we can highlight a period of interest
 ```{r plot HRV with box around dates of interest}
 # Example dates to highlight
-highlight_start <- as.Date("2025-07-30")
-highlight_end <- as.Date("2025-08-03")
+highlight_start <- as.Date("2025-07-29")
+highlight_end <- as.Date("2025-08-02")
 
 #add the mean rmssd from the detailed HRV information
 data <- data %>%
@@ -122,7 +119,5 @@ ggplot(data, aes(x = file_date, y = mean_rmssd_detail)) +
   ) +
   
   theme_bw()
-
-
 ```
 
