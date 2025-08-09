@@ -169,3 +169,204 @@ load_fitbit_hrv <- function(start_date, end_date, root_dir, summary_only = FALSE
     summary_only = summary_only
   )
 }
+
+
+#' Load Fitbit Resting Heart Rate Data for a Date Range
+#' 
+#' Reads the daily resting heart rate file from Google Data export and filters
+#' to the specified date range. Formats the data for easy joining with HRV data.
+#' 
+#' @param start_date Date or character. Start date (inclusive) of data to load.
+#' @param end_date Date or character. End date (inclusive) of data to load.
+#' @param root_dir Character. Root directory containing Fitbit data folders.
+#' 
+#' @return A tibble with columns:
+#' \describe{
+#'   \item{file_date}{Date extracted from timestamp.}
+#'   \item{timestamp}{Original timestamp from file.}
+#'   \item{resting_hr}{Resting heart rate in beats per minute.}
+#' }
+#' 
+#' @examples
+#' \dontrun{
+#' load_fitbit_resting_hr("2025-07-29", "2025-07-31", "path/to/fitbit/root")
+#' }
+load_fitbit_resting_hr <- function(start_date, end_date, root_dir) {
+  start_date <- as.Date(start_date)
+  end_date <- as.Date(end_date)
+  
+  rhr_file <- file.path(root_dir, "Physical Activity_GoogleData", "daily_resting_heart_rate.csv")
+  
+  if (!file.exists(rhr_file)) {
+    warning("Resting heart rate file not found at: ", rhr_file)
+    return(tibble())
+  }
+  
+  rhr_data <- readr::read_csv(rhr_file, show_col_types = FALSE) %>%
+    mutate(
+      timestamp = as.POSIXct(timestamp, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+      file_date = as.Date(timestamp),
+      resting_hr = `beats per minute`
+    ) %>%
+    filter(file_date >= start_date & file_date <= end_date) %>%
+    select(file_date, timestamp, resting_hr)
+  
+  return(rhr_data)
+}
+
+
+#' Combine Multiple Fitbit Data Types by Time Period
+#' 
+#' Joins multiple Fitbit datasets (HRV, resting HR, etc.) by a specified time period.
+#' Supports aggregation by day, month, hour, or minute.
+#' 
+#' @param ... Data frames to combine. Each should have a `file_date` column or timestamp column.
+#' @param by Character. Time period for aggregation: "day" (default), "month", "hour", or "minute".
+#' @param join_type Character. Type of join: "full" (default), "inner", "left".
+#' 
+#' @return A tibble with combined data aggregated by the specified time period.
+#' 
+#' @examples
+#' \dontrun{
+#' hrv_data <- load_fitbit_hrv("2025-07-29", "2025-07-31", "path/to/root")
+#' rhr_data <- load_fitbit_resting_hr("2025-07-29", "2025-07-31", "path/to/root")
+#' 
+#' # Combine by day (default)
+#' combined <- combine_fitbit_data(hrv_data, rhr_data)
+#' 
+#' # Combine by month
+#' combined_monthly <- combine_fitbit_data(hrv_data, rhr_data, by = "month")
+#' }
+combine_fitbit_data <- function(..., by = "day", join_type = "full") {
+  datasets <- list(...)
+  
+  if (length(datasets) == 0) {
+    warning("No datasets provided.")
+    return(tibble())
+  }
+  
+  # Validate join_type
+  if (!join_type %in% c("full", "inner", "left")) {
+    stop("join_type must be one of: 'full', 'inner', 'left'")
+  }
+  
+  # Validate by parameter
+  if (!by %in% c("day", "month", "hour", "minute")) {
+    stop("by must be one of: 'day', 'month', 'hour', 'minute'")
+  }
+  
+  # Determine time grouping column name
+  time_col <- case_when(
+    by == "day" ~ "file_date",
+    by == "month" ~ "year_month", 
+    by == "hour" ~ "datetime_hour",
+    by == "minute" ~ "datetime_minute"
+  )
+  
+  # Process each dataset
+  processed_datasets <- map(datasets, function(df) {
+    if (nrow(df) == 0) {
+      return(df)
+    }
+    
+    # Ensure we have a proper timestamp for hour/minute aggregation
+    df_processed <- df
+    
+    # Handle timestamp column creation/conversion
+    if ("timestamp" %in% names(df_processed)) {
+      if (is.character(df_processed$timestamp)) {
+        df_processed <- df_processed %>%
+          mutate(timestamp = as.POSIXct(timestamp))
+      }
+      # If it's already POSIXct, leave it as is
+    } else if ("file_date" %in% names(df_processed)) {
+      df_processed <- df_processed %>%
+        mutate(timestamp = as.POSIXct(file_date))
+    } else {
+      df_processed <- df_processed %>%
+        mutate(timestamp = as.POSIXct(NA))
+    }
+    
+    # Add the appropriate grouping column based on 'by' parameter
+    if (by == "day") {
+      # For daily, ensure file_date exists
+      if (!"file_date" %in% names(df_processed)) {
+        df_processed <- df_processed %>%
+          mutate(file_date = as.Date(timestamp))
+      }
+    } else if (by == "month") {
+      df_processed <- df_processed %>%
+        mutate(year_month = floor_date(
+          if ("file_date" %in% names(df_processed)) file_date else as.Date(timestamp), 
+          "month"
+        ))
+    } else if (by == "hour") {
+      df_processed <- df_processed %>%
+        mutate(datetime_hour = floor_date(timestamp, "hour"))
+    } else if (by == "minute") {
+      df_processed <- df_processed %>%
+        mutate(datetime_minute = floor_date(timestamp, "minute"))
+    }
+    
+    # Check if we have the required time column
+    if (!time_col %in% names(df_processed)) {
+      stop("Could not create required time column '", time_col, "' for dataset")
+    }
+    
+    # Group and summarize numeric columns for non-daily aggregation
+    if (by != "day") {
+      numeric_cols <- df_processed %>% 
+        select(where(is.numeric)) %>% 
+        names()
+      
+      if (length(numeric_cols) > 0) {
+        # For non-daily aggregation, summarize numeric columns
+        summary_exprs <- map(numeric_cols, ~ expr(mean(!!sym(.x), na.rm = TRUE))) %>%
+          set_names(numeric_cols)
+        
+        df_processed <- df_processed %>%
+          group_by(!!sym(time_col)) %>%
+          summarise(!!!summary_exprs, .groups = "drop")
+      } else {
+        # No numeric columns, just get distinct time periods
+        df_processed <- df_processed %>%
+          select(!!sym(time_col)) %>%
+          distinct()
+      }
+    } else {
+      # For daily data, keep all columns but ensure we have the time column
+      df_processed <- df_processed %>%
+        select(!!sym(time_col), everything(), -any_of(c("timestamp", "year_month", "datetime_hour", "datetime_minute"))) %>%
+        distinct()
+    }
+    
+    return(df_processed)
+  })
+  
+  # Remove empty datasets
+  processed_datasets <- processed_datasets[map_lgl(processed_datasets, ~ nrow(.x) > 0)]
+  
+  if (length(processed_datasets) == 0) {
+    warning("All datasets are empty after processing.")
+    return(tibble())
+  }
+  
+  if (length(processed_datasets) == 1) {
+    return(processed_datasets[[1]])
+  }
+  
+  # Join datasets
+  result <- processed_datasets[[1]]
+  
+  for (i in 2:length(processed_datasets)) {
+    if (join_type == "full") {
+      result <- full_join(result, processed_datasets[[i]], by = time_col)
+    } else if (join_type == "inner") {
+      result <- inner_join(result, processed_datasets[[i]], by = time_col)
+    } else if (join_type == "left") {
+      result <- left_join(result, processed_datasets[[i]], by = time_col)
+    }
+  }
+  
+  return(result)
+}

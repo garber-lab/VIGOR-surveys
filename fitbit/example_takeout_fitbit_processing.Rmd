@@ -20,6 +20,7 @@ library(pander)
 ```{r packages}
 library(here)
 library(tidyverse)
+library(scales)
 ```
 
 ```{r functions}
@@ -42,18 +43,18 @@ end_date="2025-08-09"
 ## Heart Rate Variablility
 ```{r load hrv data}
 # Combined detailed + summary
-data <- load_fitbit_hrv(start_date = start_date,
-                        end_date = end_date,
-                        root_dir= data_path,
-                        summary_only = FALSE)
+hrv_data <- load_fitbit_hrv(start_date = start_date,
+                            end_date = end_date, 
+                            root_dir = data_path,
+                            summary_only = FALSE)
 
 # Only summary data
-summary_only <- load_fitbit_hrv(start_date = start_date,
+hrv_data_only <- load_fitbit_hrv(start_date = start_date,
                                 end_date = end_date,
                                root_dir = data_path,
                                summary_only = TRUE)
 
-pander(sample_n(data, 5))
+pander(sample_n(hrv_data, 5))
 ```
 
 \newpage
@@ -62,7 +63,7 @@ the mean across all of the "detail" datapoints for that day. The plot below
 suggests they are not the same, but they are closely related.
 
 ```{r}
-check_if_mean_equals_summary <- data %>%
+check_if_mean_equals_summary <- hrv_data %>%
   group_by(file_date) %>%
   summarize(
     mean_rmssd_detail = mean(rmssd_detail, na.rm = TRUE),
@@ -95,12 +96,12 @@ highlight_start <- as.Date("2025-07-29")
 highlight_end <- as.Date("2025-08-02")
 
 #add the mean rmssd from the detailed HRV information
-data <- data %>%
+hrv_data <- hrv_data %>%
   group_by(file_date) %>%
   mutate(mean_rmssd_detail = mean(rmssd_detail)) %>%
   ungroup()
 
-ggplot(data, aes(x = file_date, y = mean_rmssd_detail)) +
+ggplot(hrv_data, aes(x = file_date, y = mean_rmssd_detail)) +
   geom_line(color = "blue", size = 1) +
   geom_point(color = "blue", size = 2) +
   
@@ -119,5 +120,97 @@ ggplot(data, aes(x = file_date, y = mean_rmssd_detail)) +
   ) +
   
   theme_bw()
+```
+\newpage
+
+## Add Resting Heart Rate Data
+
+```{r combine hrv and rhr}
+rhr_data <- load_fitbit_resting_hr(start_date = start_date,
+                            end_date = end_date, 
+                            root_dir = data_path)
+
+# Combine by day (default)
+combined <- combine_fitbit_data(hrv_data, rhr_data)
+pander(sample_n(combined, 5))
+```
+\newpage
+
+The plot below compares heart rate variability to resting heart rate.
+You can see there is a rough inverse correlation.
+
+```{r}
+# Data prep
+compare_rhr_hrv <- combined %>%
+  group_by(file_date) %>%
+  summarize(
+    mean_rmssd_detail = mean(rmssd_detail, na.rm = TRUE),
+    resting_hr = first(resting_hr)
+  ) %>%
+  ungroup()
+
+# observed HR range
+min_hr <- min(compare_rhr_hrv$resting_hr, na.rm = TRUE)
+max_hr <- max(compare_rhr_hrv$resting_hr, na.rm = TRUE)
+
+# scaling factor using observed ranges
+scale_factor <- (max(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE) -
+                 min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)) /
+                (max_hr - min_hr)
+
+# means
+mean_hrv <- mean(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)
+mean_rhr <- mean(compare_rhr_hrv$resting_hr, na.rm = TRUE)
+
+# get default ggplot colors (2-category hue palette)
+plot_colors <- hue_pal()(2)
+
+# Assign colors to measures consistently
+measure_colors <- c("HRV (RMSSD)" = plot_colors[1],
+                    "Resting HR"  = plot_colors[2])
+
+ggplot(compare_rhr_hrv, aes(x = file_date)) +
+  geom_line(aes(y = mean_rmssd_detail, color = "HRV (RMSSD)"), size = 1) +
+  geom_point(aes(y = mean_rmssd_detail, color = "HRV (RMSSD)"), size = 2) +
+  geom_line(aes(
+    y = (resting_hr - min_hr) * scale_factor +
+        min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
+    color = "Resting HR"
+  ), size = 1) +
+  geom_point(aes(
+    y = (resting_hr - min_hr) * scale_factor +
+        min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
+    color = "Resting HR"
+  ), size = 2) +
+  
+  # mean lines matching legend colors
+  geom_hline(yintercept = mean_hrv, linetype = "dashed", color = measure_colors["HRV (RMSSD)"]) +
+  geom_hline(
+    yintercept = (mean_rhr - min_hr) * scale_factor +
+                 min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
+    linetype = "dashed", color = measure_colors["Resting HR"]
+  ) +
+  
+  scale_color_manual(values = measure_colors) +
+  scale_y_continuous(
+    name = "Heart Rate Variability (Higher is Better)",
+    sec.axis = sec_axis(
+      ~ (. - min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)) / scale_factor + min_hr,
+      name = "Resting Heart Rate (bpm)"
+    )
+  ) +
+  labs(
+    title = "Comparison of Heart Rate Variability and Resting Heart Rate",
+    x = "Date",
+    color = "Measure"
+  ) +
+  annotate(
+    "rect",
+    xmin = highlight_start, xmax = highlight_end,
+    ymin = -Inf, ymax = Inf,
+    alpha = 0.2, fill = "orange"
+  ) +
+  theme_bw()
+
 ```
 
