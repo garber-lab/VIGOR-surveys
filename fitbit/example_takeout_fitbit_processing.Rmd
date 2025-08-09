@@ -36,12 +36,12 @@ print(data_path)
 # Explore some FitBit data
 ```{r constants}
 #define some constants for the nb
-start_date="2025-07-07"
+start_date="2021-01-07"
 end_date="2025-08-09"
 
 #add some dates of interest to highlight
 dates_of_interest_start = "2025-07-29"
-dates_of_interest_end = "2025-08-02"
+dates_of_interest_end = "2025-08-01"
 ```
 
 ## Heart Rate Variablility

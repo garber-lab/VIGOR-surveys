@@ -10,6 +10,8 @@ library(lubridate)
 #' @param start_date Date or character. Start date (inclusive) for searching files.
 #' @param end_date Date or character. End date (inclusive) for searching files.
 #' @param root_dir Character. Root directory path containing the Fitbit data folder structure.
+#' @param force_all_dates Logical. If TRUE, returns rows for all dates in range even if files are missing.
+#'   If FALSE (default), only returns rows for dates where at least one file exists.
 #' 
 #' @return A tibble with columns:
 #' \describe{
@@ -19,7 +21,7 @@ library(lubridate)
 #' }
 #' 
 #' @keywords internal
-find_fitbit_hrv_files <- function(start_date, end_date, root_dir) {
+find_fitbit_hrv_files <- function(start_date, end_date, root_dir, force_all_dates = FALSE) {
   start_date <- as.Date(start_date)
   end_date <- as.Date(end_date)
   date_seq <- seq(start_date, end_date, by = "day")
@@ -52,10 +54,18 @@ find_fitbit_hrv_files <- function(start_date, end_date, root_dir) {
       full.names = TRUE
     )
     
+    # Check if we should include this date
+    has_summary <- length(summary_file) == 1
+    has_detail <- length(detail_file) == 1
+    
+    if (!force_all_dates && !has_summary && !has_detail) {
+      return(NULL)  # Skip this date if no files exist
+    }
+    
     tibble(
       file_date = d,
-      summary_file = ifelse(length(summary_file) == 1, summary_file, NA_character_),
-      detail_file = ifelse(length(detail_file) == 1, detail_file, NA_character_)
+      summary_file = ifelse(has_summary, summary_file, NA_character_),
+      detail_file = ifelse(has_detail, detail_file, NA_character_)
     )
   })
   
@@ -66,21 +76,30 @@ find_fitbit_hrv_files <- function(start_date, end_date, root_dir) {
 #' Read and Join Fitbit HRV Summary and Detail Files for a Single Date
 #' 
 #' Helper function that reads the summary file from the previous day and detail file from 
-#' the current date, joins them by `file_date`, and handles missing files gracefully by 
-#' returning rows with `NA`s for missing data. This aligns summary data with detail data 
+#' the current date, joins them by `file_date`, and handles missing files gracefully. 
+#' By default, returns NULL if the detail file is missing (no row created), but this can 
+#' be overridden with force_missing_detail. This aligns summary data with detail data 
 #' to correct the one-day offset in Fitbit's HRV reporting.
 #' 
 #' @param file_date Date. The date corresponding to the detail file to read.
 #' @param summary_file Character or NA. File path to the summary CSV from previous day or NA if missing.
 #' @param detail_file Character or NA. File path to the detail CSV from current date or NA if missing.
 #' @param summary_only Logical. If TRUE, only summary data is returned.
+#' @param force_missing_detail Logical. If TRUE, creates a row with NA detail values even when detail file is missing.
+#'   If FALSE (default), returns NULL when detail file is missing (unless summary_only = TRUE).
 #' 
-#' @return A tibble containing joined data for the date, with NA-filled rows if files are missing.
-#' 
-#' @keywords internal
-read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, summary_only = FALSE) {
+#' @return A tibble containing joined data for the date, NULL if detail file missing and not forced, 
+#'   or NA-filled rows if files are missing but forced.
+read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, summary_only = FALSE, force_missing_detail = FALSE) {
+  # If both files are missing, always return NULL
   if (is.na(summary_file) && is.na(detail_file)) {
     warning("No files found for ", format(file_date, "%Y-%m-%d"), ". Skipping.")
+    return(NULL)
+  }
+  
+  # If detail file is missing and we're not in summary_only mode and not forcing missing details
+  if (is.na(detail_file) && !summary_only && !force_missing_detail) {
+    warning("Missing detail file for ", format(file_date, "%Y-%m-%d"), ". Skipping (use force_missing_detail = TRUE to include).")
     return(NULL)
   }
   
@@ -89,7 +108,7 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
   }
   
   if (is.na(detail_file) && !summary_only) {
-    warning("Missing detail file for ", format(file_date, "%Y-%m-%d"))
+    warning("Missing detail file for ", format(file_date, "%Y-%m-%d"), " - creating row with NA detail values")
   }
   
   # Read summary or create a 1-row tibble with NA values
