@@ -39,11 +39,11 @@ print(data_path)
 ## Heart Rate Variablility
 ```{r}
 # Combined detailed + summary
-data <- load_fitbit_hrv("2025-07-29", "2025-07-30",
+data <- load_fitbit_hrv("2025-07-29", "2025-07-31",
                         data_path)
 
 # Only summary data
-summary_only <- load_fitbit_hrv("2025-07-29", "2025-07-30",
+summary_only <- load_fitbit_hrv("2025-07-29", "2025-07-31",
                                data_path,
                                summary_only = TRUE)
 ```

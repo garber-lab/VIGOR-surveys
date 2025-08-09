@@ -56,23 +56,38 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
     warning("Missing detail file for ", format(file_date, "%Y-%m-%d"))
   }
   
+  # Read summary or create empty tibble with expected columns & one row for date
   summary_df <- if (!is.na(summary_file)) {
     readr::read_csv(summary_file, show_col_types = FALSE) %>%
       mutate(file_date = file_date)
   } else {
-    tibble(timestamp = as.POSIXct(NA), rmssd = NA_real_, nremhr = NA_real_, entropy = NA_real_, file_date = file_date)[0, ]
+    # create 1-row tibble with NA summary columns and the file_date
+    tibble(
+      timestamp = as.POSIXct(NA),
+      rmssd = NA_real_,
+      nremhr = NA_real_,
+      entropy = NA_real_,
+      file_date = file_date
+    )
   }
   
   if (summary_only) {
     return(summary_df)
   }
   
+  # Read details or create empty tibble with expected columns & one row for date
   details_df <- if (!is.na(detail_file)) {
     readr::read_csv(detail_file, show_col_types = FALSE) %>%
       mutate(file_date = file_date)
   } else {
-    tibble(timestamp = as.POSIXct(NA), rmssd = NA_real_, coverage = NA_real_,
-           low_frequency = NA_real_, high_frequency = NA_real_, file_date = file_date)[0, ]
+    tibble(
+      timestamp = as.POSIXct(NA),
+      rmssd = NA_real_,
+      coverage = NA_real_,
+      low_frequency = NA_real_,
+      high_frequency = NA_real_,
+      file_date = file_date
+    )
   }
   
   full_join(details_df, summary_df, by = "file_date", suffix = c("_detail", "_summary"))
