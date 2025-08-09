@@ -1,0 +1,50 @@
+---
+title: "Processing Google Takeout Fitbit Data"
+author: Genevieve Roberts
+output:
+  pdf_document:
+    latex_engine: pdflatex  # Specify the LaTeX engine
+date: "2025-08-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(warn = -1)
+library(knitr)
+library(kableExtra)
+library(pander)
+```
+
+## Load Packages
+
+```{r packages}
+library(here)
+library(tidyverse)
+```
+
+
+```{r functions}
+source(here::here("fitbit/takeout_fitbit_processing_functions.R"))
+```
+
+\newpage
+
+# Explore some FitBit data
+```{r}
+#current path
+data_path <- here::here("fitbit/sample_fitbit_takeout_data/9Aug25_groberts_fitbit_takeout/Fitbit")
+print(data_path)
+```
+
+## Heart Rate Variablility
+```{r}
+# Combined detailed + summary
+data <- load_fitbit_hrv("2025-07-29", "2025-07-30",
+                        data_path)
+
+# Only summary data
+summary_only <- load_fitbit_hrv("2025-07-29", "2025-07-30",
+                               data_path,
+                               summary_only = TRUE)
+```
+
