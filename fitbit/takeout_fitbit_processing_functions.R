@@ -87,17 +87,20 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
     warning("Missing detail file for ", format(file_date, "%Y-%m-%d"))
   }
   
-  # Read summary or create a 1-row tibble with NA values
+  # Read summary or create NA tibble, then shift summary timestamps and file_date +1 day
   summary_df <- if (!is.na(summary_file)) {
     readr::read_csv(summary_file, show_col_types = FALSE) %>%
-      mutate(file_date = file_date)
+      mutate(
+        timestamp = as.POSIXct(timestamp) + lubridate::days(1),
+        file_date = file_date + lubridate::days(1)
+      )
   } else {
     tibble(
       timestamp = as.POSIXct(NA),
       rmssd = NA_real_,
       nremhr = NA_real_,
       entropy = NA_real_,
-      file_date = file_date
+      file_date = file_date + lubridate::days(1)
     )
   }
   
@@ -105,7 +108,7 @@ read_and_join_hrv_for_date <- function(file_date, summary_file, detail_file, sum
     return(summary_df)
   }
   
-  # Read details or create a 1-row tibble with NA values
+  # Read details or create NA tibble, keep original file_date
   details_df <- if (!is.na(detail_file)) {
     readr::read_csv(detail_file, show_col_types = FALSE) %>%
       mutate(file_date = file_date)

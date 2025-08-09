@@ -63,7 +63,7 @@ pander(head(data))
 
 Here, I want to know if the `rmssd_summary` from the summary HRV files is simply
 the mean across all of the "detail" datapoints for that day. The plot below
-suggests they are not the same, but they are related.
+suggests they are not the same, but they are closely related.
 
 ```{r}
 check_if_mean_equals_summary <- data %>%
