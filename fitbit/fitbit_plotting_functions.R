@@ -2,7 +2,44 @@ library(dplyr)
 library(ggplot2)
 library(scales)
 library(rlang)
+library(tidyr)
 
+#' Plot Two Numerical Variables Over Time with Dual Y-Axes and Matching Colors
+#'
+#' Creates a time series line plot comparing two numerical variables that share the same
+#' date column (`file_date`). The plot uses dual y-axes with independent scales to better
+#' visualize differences in magnitude. The left and right y-axis labels and ticks are
+#' colored to match their corresponding lines.
+#'
+#' The function optionally adds dashed horizontal lines representing the mean of each
+#' variable and can highlight a date range with a translucent orange rectangle.
+#'
+#' @param data A data frame containing at least a `file_date` column and two numerical columns.
+#' @param col1 Bare or quoted name of the first numerical variable to plot (left y-axis).
+#' @param col2 Bare or quoted name of the second numerical variable to plot (right y-axis).
+#' @param label1 Character. Label for the first variable and left y-axis. Defaults to the name of `col1`.
+#' @param label2 Character. Label for the second variable and right y-axis. Defaults to the name of `col2`.
+#' @param title Character. Plot title. Defaults to "Comparison of {label1} and {label2}".
+#' @param highlight_start Date or character. Start date of the highlight range (optional).
+#' @param highlight_end Date or character. End date of the highlight range (optional).
+#' @param show_means Logical. Whether to show dashed horizontal lines at the mean values of each variable. Defaults to TRUE.
+#'
+#' @return A `ggplot` object showing the time series comparison with dual y-axes.
+#'
+#' @examples
+#' \dontrun{
+#' plot_dual_axis(
+#'   data = combined,
+#'   col1 = rmssd_detail,
+#'   col2 = resting_hr,
+#'   label1 = "HRV (RMSSD)",
+#'   label2 = "Resting Heart Rate (bpm)",
+#'   title = "HRV vs Resting Heart Rate Over Time",
+#'   highlight_start = "2025-07-01",
+#'   highlight_end = "2025-07-10",
+#'   show_means = TRUE
+#' )
+#' }
 plot_dual_axis <- function(data,
                            col1,
                            col2,
@@ -10,12 +47,8 @@ plot_dual_axis <- function(data,
                            label2 = NULL,
                            title = NULL,
                            highlight_start = NULL,
-                           highlight_end = NULL) {
-  library(dplyr)
-  library(ggplot2)
-  library(scales)
-  library(rlang)
-  library(tidyr)
+                           highlight_end = NULL,
+                           show_means = TRUE) {
   
   col1 <- enquo(col1)
   col2 <- enquo(col2)
@@ -61,12 +94,6 @@ plot_dual_axis <- function(data,
   p <- ggplot(long_df, aes(x = file_date, y = Value, color = Measure)) +
     geom_line(size = 1) +
     geom_point(size = 2) +
-    # Mean lines (on scaled y for plotting)
-    geom_hline(yintercept = mean1, linetype = "dashed", color = measure_colors[label1]) +
-    geom_hline(
-      yintercept = (mean2 - min2) * scale_factor + min(plot_df$var1, na.rm = TRUE),
-      linetype = "dashed", color = measure_colors[label2]
-    ) +
     scale_color_manual(values = measure_colors) +
     scale_y_continuous(
       name = label1,
@@ -80,7 +107,23 @@ plot_dual_axis <- function(data,
       x = "Date",
       color = "Measure"
     ) +
-    theme_bw()
+    theme_bw() +
+    theme(
+      axis.title.y = element_text(color = measure_colors[label1]),
+      axis.title.y.right = element_text(color = measure_colors[label2]),
+      axis.text.y = element_text(color = measure_colors[label1]),
+      axis.text.y.right = element_text(color = measure_colors[label2])
+    )
+  
+  # Optional mean lines
+  if (show_means) {
+    p <- p +
+      geom_hline(yintercept = mean1, linetype = "dashed", color = measure_colors[label1]) +
+      geom_hline(
+        yintercept = (mean2 - min2) * scale_factor + min(plot_df$var1, na.rm = TRUE),
+        linetype = "dashed", color = measure_colors[label2]
+      )
+  }
   
   # Optional highlight region
   if (!is.null(highlight_start) && !is.null(highlight_end)) {
@@ -98,4 +141,3 @@ plot_dual_axis <- function(data,
   
   return(p)
 }
-

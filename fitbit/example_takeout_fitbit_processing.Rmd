@@ -41,7 +41,7 @@ end_date="2025-08-09"
 
 #add some dates of interest to highlight
 dates_of_interest_start = "2025-07-29"
-dates_of_interest_end = "2025-07-31"
+dates_of_interest_end = "2025-08-02"
 ```
 
 ## Heart Rate Variablility
@@ -156,6 +156,7 @@ plot_dual_axis(
 )
 ```
 \newpage
+
 ### Daily Readiness Score
 ```{r}
 # Load the daily readiness score and combine it with the other data
@@ -167,6 +168,8 @@ daily_ready <- load_fitbit_daily_readiness(start_date = start_date,
 combined <- combine_fitbit_data(combined, daily_ready)
 ```
 
+The plot below shows a roughly inverse correlation between Daily Readiness Score
+and Resting Heartrate:
 ```{r}
 plot_dual_axis(
   data = combined,
