@@ -1,6 +1,9 @@
 # Credendials
 credentials.R
 
+#Fitbit data
+sample_fitbit_takeout_data/*
+
 # History files
 .Rhistory
 .Rapp.history
