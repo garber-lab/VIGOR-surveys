@@ -20,11 +20,11 @@ library(pander)
 ```{r packages}
 library(here)
 library(tidyverse)
-library(scales)
 ```
 
 ```{r functions}
 source(here::here("fitbit/takeout_fitbit_processing_functions.R"))
+source(here::here("fitbit/fitbit_plotting_functions.R"))
 ```
 
 ```{r data path}
@@ -38,6 +38,10 @@ print(data_path)
 #define some constants for the nb
 start_date="2025-07-07"
 end_date="2025-08-09"
+
+#add some dates of interest to highlight
+dates_of_interest_start = "2025-07-29"
+dates_of_interest_end = "2025-07-31"
 ```
 
 ## Heart Rate Variablility
@@ -140,77 +144,39 @@ The plot below compares heart rate variability to resting heart rate.
 You can see there is a rough inverse correlation.
 
 ```{r}
-# Data prep
-compare_rhr_hrv <- combined %>%
-  group_by(file_date) %>%
-  summarize(
-    mean_rmssd_detail = mean(rmssd_detail, na.rm = TRUE),
-    resting_hr = first(resting_hr)
-  ) %>%
-  ungroup()
+plot_dual_axis(
+  data = combined,
+  col1 = rmssd_detail,
+  col2 = resting_hr,
+  label1 = "HRV (RMSSD)",
+  label2 = "Resting HR (bpm)",
+  title = "Comparison of HRV and RHR",
+  highlight_start = dates_of_interest_start,
+  highlight_end = dates_of_interest_end
+)
+```
+\newpage
+### Daily Readiness Score
+```{r}
+# Load the daily readiness score and combine it with the other data
+daily_ready <- load_fitbit_daily_readiness(start_date = start_date,
+                            end_date = end_date, 
+                            root_dir = data_path)
 
-# observed HR range
-min_hr <- min(compare_rhr_hrv$resting_hr, na.rm = TRUE)
-max_hr <- max(compare_rhr_hrv$resting_hr, na.rm = TRUE)
+# Combine by day
+combined <- combine_fitbit_data(combined, daily_ready)
+```
 
-# scaling factor using observed ranges
-scale_factor <- (max(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE) -
-                 min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)) /
-                (max_hr - min_hr)
-
-# means
-mean_hrv <- mean(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)
-mean_rhr <- mean(compare_rhr_hrv$resting_hr, na.rm = TRUE)
-
-# get default ggplot colors (2-category hue palette)
-plot_colors <- hue_pal()(2)
-
-# Assign colors to measures consistently
-measure_colors <- c("HRV (RMSSD)" = plot_colors[1],
-                    "Resting HR"  = plot_colors[2])
-
-ggplot(compare_rhr_hrv, aes(x = file_date)) +
-  geom_line(aes(y = mean_rmssd_detail, color = "HRV (RMSSD)"), size = 1) +
-  geom_point(aes(y = mean_rmssd_detail, color = "HRV (RMSSD)"), size = 2) +
-  geom_line(aes(
-    y = (resting_hr - min_hr) * scale_factor +
-        min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
-    color = "Resting HR"
-  ), size = 1) +
-  geom_point(aes(
-    y = (resting_hr - min_hr) * scale_factor +
-        min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
-    color = "Resting HR"
-  ), size = 2) +
-  
-  # mean lines matching legend colors
-  geom_hline(yintercept = mean_hrv, linetype = "dashed", color = measure_colors["HRV (RMSSD)"]) +
-  geom_hline(
-    yintercept = (mean_rhr - min_hr) * scale_factor +
-                 min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE),
-    linetype = "dashed", color = measure_colors["Resting HR"]
-  ) +
-  
-  scale_color_manual(values = measure_colors) +
-  scale_y_continuous(
-    name = "Heart Rate Variability (Higher is Better)",
-    sec.axis = sec_axis(
-      ~ (. - min(compare_rhr_hrv$mean_rmssd_detail, na.rm = TRUE)) / scale_factor + min_hr,
-      name = "Resting Heart Rate (bpm)"
-    )
-  ) +
-  labs(
-    title = "Comparison of Heart Rate Variability and Resting Heart Rate",
-    x = "Date",
-    color = "Measure"
-  ) +
-  annotate(
-    "rect",
-    xmin = highlight_start, xmax = highlight_end,
-    ymin = -Inf, ymax = Inf,
-    alpha = 0.2, fill = "orange"
-  ) +
-  theme_bw()
-
+```{r}
+plot_dual_axis(
+  data = combined,
+  col1 = daily_readiness_score,
+  col2 = resting_hr,
+  label1 = "Daily Readiness Score \n(Higher is Better)",
+  label2 = "Resting HR \n(bpm)",
+  title = "Comparison of Daily Readiness Score\nand Resting Heartrate",
+  highlight_start = dates_of_interest_start,
+  highlight_end = dates_of_interest_end
+)
 ```
 

@@ -215,6 +215,60 @@ load_fitbit_resting_hr <- function(start_date, end_date, root_dir) {
 }
 
 
+#' Load Fitbit Daily Readiness Data for a Date Range
+#'
+#' Reads the Fitbit daily readiness CSV from the Google Data export, filters it
+#' to the specified date range, and formats it for joining with other Fitbit
+#' metrics. Includes overall readiness score as well as category-specific
+#' readiness indicators.
+#'
+#' @param start_date Date or character. Start date (inclusive) of data to load.
+#' @param end_date Date or character. End date (inclusive) of data to load.
+#' @param root_dir Character. Root directory containing Fitbit data folders.
+#'
+#' @return A tibble with columns:
+#' \describe{
+#'   \item{timestamp}{POSIXct. Original timestamp from the file (UTC).}
+#'   \item{file_date}{Date. Date extracted from the timestamp.}
+#'   \item{daily_readiness_cat}{Character. Overall readiness category.}
+#'   \item{sleep_readiness_cat}{Character. Readiness category for sleep.}
+#'   \item{hrv_readiness_cat}{Character. Readiness category for heart rate variability.}
+#'   \item{rhr_readiness_cat}{Character. Readiness category for resting heart rate.}
+#'   \item{daily_readiness_score}{Numeric. Overall readiness score.}
+#' }
+#'
+#' @examples
+#' \dontrun{
+#' load_fitbit_daily_readiness("2025-07-29", "2025-07-31", "path/to/fitbit/root")
+#' }
+
+load_fitbit_daily_readiness <- function(start_date, end_date, root_dir) {
+  start_date <- as.Date(start_date)
+  end_date <- as.Date(end_date)
+  
+  ready_file <- file.path(root_dir, "Physical Activity_GoogleData", "daily_readiness.csv")
+  
+  if (!file.exists(ready_file)) {
+    warning("Daily readiness file not found at: ", ready_file)
+    return(tibble())
+  }
+  
+  ready_data <- readr::read_csv(ready_file, show_col_types = FALSE) %>%
+    transmute(
+      file_date = as.Date(timestamp),
+      daily_readiness_cat = type,
+      sleep_readiness_cat = `sleep readiness`,
+      hrv_readiness_cat = `heart rate variability readiness`,
+      rhr_readiness_cat = `resting heart rate readiness`,
+      daily_readiness_score = score
+    ) %>%
+    filter(file_date >= start_date & file_date <= end_date)
+  
+  return(ready_data)
+}
+
+
+
 #' Combine Multiple Fitbit Data Types by Time Period
 #' 
 #' Joins multiple Fitbit datasets (HRV, resting HR, etc.) by a specified time period.
