@@ -36,8 +36,12 @@ print(data_path)
 # Explore some FitBit data
 ```{r constants}
 #define some constants for the nb
-start_date="2021-01-07"
+start_date="2025-07-07"
 end_date="2025-08-09"
+
+#old dates (2021)
+old_start_date="2021-07-07"
+old_end_date="2021-08-09"
 
 #add some dates of interest to highlight
 dates_of_interest_start = "2025-07-29"
@@ -75,56 +79,16 @@ check_if_mean_equals_summary <- hrv_data %>%
   ) %>%
   ungroup()
 
-# Prepare data in long format for plotting
-mean_detail_compare_plot_df <- check_if_mean_equals_summary %>%
-  pivot_longer(cols = c(mean_rmssd_detail, rmssd_summary),
-               names_to = "Type",
-               values_to = "RMSSD")
-
-ggplot(mean_detail_compare_plot_df, aes(x = file_date, y = RMSSD, color = Type)) +
-  geom_line(size = 1) +
-  geom_point(size = 2) +
-  labs(
-    title = "Comparison of RMSSD: Detail Mean vs. Summary",
-    x = "Date",
-    y = "RMSSD",
-    color = "Measure"
-  ) +
-  theme_bw()
+plot_dual_axis(
+  data = check_if_mean_equals_summary,
+  col1 = mean_rmssd_detail,
+  col2 =  rmssd_summary,
+  label1 = "Mean Daily RMSSD",
+  label2 = "Summary File RMSSD",
+  title = "Comparison of mean and summary RMSSD"
+)
 ```
-\newpage
-The plot below shows how we can highlight a period of interest
-```{r plot HRV with box around dates of interest}
-# Example dates to highlight
-highlight_start <- as.Date("2025-07-29")
-highlight_end <- as.Date("2025-08-02")
 
-#add the mean rmssd from the detailed HRV information
-hrv_data <- hrv_data %>%
-  group_by(file_date) %>%
-  mutate(mean_rmssd_detail = mean(rmssd_detail)) %>%
-  ungroup()
-
-ggplot(hrv_data, aes(x = file_date, y = mean_rmssd_detail)) +
-  geom_line(color = "blue", size = 1) +
-  geom_point(color = "blue", size = 2) +
-  
-  # Highlight date range with a transparent rectangle
-  annotate(
-    "rect",
-    xmin = highlight_start, xmax = highlight_end,
-    ymin = -Inf, ymax = Inf,
-    alpha = 0.2, fill = "orange"
-  ) +
-  
-  labs(
-    title = "HRV Over Time with Highlighted Date Range",
-    x = "Date",
-    y = "HRV (Mean RMSSD Detail)"
-  ) +
-  
-  theme_bw()
-```
 \newpage
 
 ## Add Resting Heart Rate Data
@@ -181,5 +145,152 @@ plot_dual_axis(
   highlight_start = dates_of_interest_start,
   highlight_end = dates_of_interest_end
 )
+```
+\newpage
+
+## Combine Old (2021) and Newer (2025) Data
+
+```{r}
+#read in 2021 data
+old_hrv_data <- load_fitbit_hrv(start_date = old_start_date,
+                            end_date = old_end_date, 
+                            root_dir = data_path)
+
+old_rhr_data <- load_fitbit_resting_hr(start_date = old_start_date,
+                            end_date = old_end_date, 
+                            root_dir = data_path)
+
+# Combine by day (default)
+old_combined <- combine_fitbit_data(old_hrv_data, old_rhr_data)
+
+# Combine with new data
+new_old_combined <- bind_rows(combined, old_combined)
+```
+
+```{r}
+plot_dual_axis(
+  data = old_combined,
+  col1 = rmssd_detail,
+  col2 = resting_hr,
+  label1 = "HRV (RMSSD)",
+  label2 = "Resting HR (bpm)",
+  title = "Comparison of HRV and RHR from 2021 Data from Same Period"
+)
+```
+\newpage
+
+```{r}
+# Create year variable from file_date
+new_old_combined <- new_old_combined %>%
+  mutate(year = as.factor(year(file_date)))
+
+# Reshape data to long format for faceting
+data_long <- new_old_combined %>%
+  pivot_longer(cols = c(resting_hr, rmssd_detail), 
+               names_to = "metric", 
+               values_to = "value") %>%
+  mutate(metric = case_when(
+    metric == "resting_hr" ~ "Resting Heart Rate (bpm)",
+    metric == "rmssd_detail" ~ "RMSSD Detail (ms)"
+  ))
+
+# Perform statistical tests for each metric
+statistical_results <- data_long %>%
+  group_by(metric) %>%
+  summarise(
+    # Kolmogorov-Smirnov test - compares entire distributions
+    ks_p = ks.test(value[year == "2021"], value[year == "2025"])$p.value,
+    ks_statistic = ks.test(value[year == "2021"], value[year == "2025"])$statistic,
+    # Mann-Whitney U test (Wilcoxon rank-sum test) - compares medians
+    wilcox_p = wilcox.test(value[year == "2021"], value[year == "2025"])$p.value,
+    # Summary statistics for context
+    median_2021 = median(value[year == "2021"], na.rm = TRUE),
+    median_2025 = median(value[year == "2025"], na.rm = TRUE),
+    mean_2021 = mean(value[year == "2021"], na.rm = TRUE),
+    mean_2025 = mean(value[year == "2025"], na.rm = TRUE),
+    # Sample sizes
+    n_2021 = sum(year == "2021"),
+    n_2025 = sum(year == "2025"),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Calculate differences (2025 - 2021)
+    mean_diff = mean_2025 - mean_2021,
+    median_diff = median_2025 - median_2021,
+    # Format p-values appropriately 
+    ks_p_formatted = ifelse(ks_p < 0.001, "p < 0.001", 
+                           paste("p =", format(round(ks_p, 3), nsmall = 3))),
+    wilcox_p_formatted = ifelse(wilcox_p < 0.001, "p < 0.001", 
+                               paste("p =", format(round(wilcox_p, 3), nsmall = 3))),
+    # Create significance labels for KS test
+    ks_significance = case_when(
+      ks_p < 0.001 ~ "***",
+      ks_p < 0.01 ~ "**", 
+      ks_p < 0.05 ~ "*",
+      ks_p < 0.1 ~ "†",
+      TRUE ~ "ns"
+    ),
+    # Create significance labels for Wilcoxon test
+    wilcox_significance = case_when(
+      wilcox_p < 0.001 ~ "***",
+      wilcox_p < 0.01 ~ "**", 
+      wilcox_p < 0.05 ~ "*",
+      wilcox_p < 0.1 ~ "†",
+      TRUE ~ "ns"
+    ),
+    # Create annotation text with differences and statistical tests
+    annotation_text = paste0(
+      "Diff Median: ", ifelse(median_diff >= 0, "+", ""), format(round(median_diff, 1), nsmall = 1), 
+      " | Diff Mean: ", ifelse(mean_diff >= 0, "+", ""), format(round(mean_diff, 1), nsmall = 1), "\n",
+      "KS: ", ks_p_formatted, " ", ks_significance, " | ",
+      "Wilcoxon: ", wilcox_p_formatted, " ", wilcox_significance
+    )
+  )
+
+# Create annotation data frame for adding p-values to plot
+annotation_df <- statistical_results %>%
+  # Calculate y-position for annotations (top of each facet)
+  left_join(
+    data_long %>% 
+      group_by(metric) %>% 
+      summarise(max_val = max(value, na.rm = TRUE), .groups = "drop"),
+    by = "metric"
+  ) %>%
+  mutate(
+    y_pos = max_val * 1.05,  # Position slightly above maximum value
+    x_pos = 1.5  # Center between the two years
+  )
+
+# Create the violin plot with statistical annotations
+p <- ggplot(data_long, aes(x = year, y = value, fill = year)) +
+  geom_violin(alpha = 0.7, trim = FALSE) +
+  geom_boxplot(width = 0.1, alpha = 0.8, outlier.shape = NA) +
+  # Add statistical annotation
+  geom_text(data = annotation_df, 
+            aes(x = x_pos, y = y_pos, label = annotation_text),
+            inherit.aes = FALSE, 
+            size = 3, 
+            fontface = "italic",
+            hjust = 0.5) +
+  facet_wrap(~metric, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Heart Rate Variability and Resting Heart Rate: 2021 vs 2025",
+    subtitle = "Violin plots showing distribution of measurements with statistical comparisons",
+    x = "Year",
+    y = "Value",
+    fill = "Year",
+    caption = "Statistical significance: *** p<0.001, ** p<0.01, * p<0.05, † p<0.1, ns = not significant\nDiff = 2025 - 2021 difference; KS test compares distributions; Wilcoxon test compares medians"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    plot.caption = element_text(size = 9, hjust = 0)
+  )
+
+p
 ```
 
