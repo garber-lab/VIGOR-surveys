@@ -2,7 +2,7 @@
 credentials.R
 
 #Fitbit data
-sample_fitbit_takeout_data/*
+fitbit/sample_fitbit_takeout_data/*
 
 # History files
 .Rhistory

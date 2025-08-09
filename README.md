@@ -66,9 +66,9 @@ Please contribute any new functions or improvements by adding them to the approp
 Load the modules in your R session with:
 
 ```r
-source(str_c(here(), "/credentials.R"))
-source(str_c(here(), "/constants.R"))
-source(str_c(here(), "/query_functions.R"))
-source(str_c(here(), "/surveys/survey_functions.R"))
+source(here::here("/credentials.R"))
+source(here::here("/constants.R"))
+source(here::here("/query_functions.R"))
+source(here::here("/surveys/survey_functions.R"))
 ```
 Then, proceed with writing your notebook as usual! Totally ok to include your notebook in this repo as well.
