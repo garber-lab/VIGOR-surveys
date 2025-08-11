@@ -11,6 +11,7 @@ fitbit/sample_fitbit_takeout_data/*
 # Session Data files
 .RData
 .RDataTmp
+.DS_Store
 
 # User-specific files
 .Ruserdata
