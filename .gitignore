@@ -2,7 +2,7 @@
 credentials.R
 
 #Fitbit data
-sample_fitbit_takeout_data/*
+fitbit/sample_fitbit_takeout_data/*
 
 # History files
 .Rhistory
@@ -11,6 +11,7 @@ sample_fitbit_takeout_data/*
 # Session Data files
 .RData
 .RDataTmp
+.DS_Store
 
 # User-specific files
 .Ruserdata
