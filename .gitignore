@@ -1,5 +1,5 @@
 # Credendials
-credentials.R
+foundry_credentials.R
 
 #Fitbit data
 fitbit/sample_fitbit_takeout_data/*
