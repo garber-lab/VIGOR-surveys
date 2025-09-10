@@ -1,0 +1,256 @@
+---
+title: "Pull Survey Responses"
+author: "Thomas Jacob"
+date: "Created Sept 9, 2025 \nLast opened: `r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_notebook:
+    toc: yes
+---
+
+# Initialization
+
+```{r load_pkgs, include=TRUE}
+if(!require(tidyverse)){
+  install.packages("tidyverse")
+  library(tidyverse)
+}
+
+if(!require(httr)){
+  install.packages("httr")
+  library(httr)
+}
+
+if(!require(jsonlite)){
+  install.packages("jsonlite")
+  library(jsonlite)
+}
+
+if(!require(here)){
+  install.packages("here")
+  # library(here)
+}
+
+if(!require(readxl)){
+  install.packages("readxl")
+  # library(readxl)
+}
+
+if(!require(knitr)){
+  install.packages("knitr")
+  library(knitr)
+}
+
+if(!require(DT)){
+  install.packages("DT")
+  library(DT)
+}
+```
+
+
+```{r set_here_root, include=FALSE}
+# set the directory with the credentials file as the anchor point
+here::i_am("foundry_credentials.R")
+```
+
+
+```{r set_credentials, include=FALSE}
+# load Foundry API credentials from file
+source(here::here("foundry_credentials.R"))
+
+# load constants
+source(here::here("constants.R"))
+
+# load querying functions
+source(here::here("query_functions.R"))
+
+# load survey cleaning functions
+source(here::here("surveys", "survey_functions.R"))
+```
+
+
+# Load Data
+
+```{r initiate_foundry_session, include=FALSE}
+token <- init_foundry_session(email=email,
+                     password=password,
+                     access_url = access_url)
+```
+
+
+```{r last_updated_pt, include=FALSE, echo=TRUE}
+last_updated_fdry <- get_time_fountry_last_updated(formatted=FALSE)
+last_updated_fdry_fmt <- get_time_fountry_last_updated(formatted = TRUE)
+print(last_updated_fdry_fmt)
+```
+
+
+```{r load_participants, include=FALSE}
+# pull from the API
+patients_raw <- get_df(
+  foundry_token = token,
+  access_url_base = access_url_base,
+  api_url = patients_url
+)
+
+# clean the patients DF
+patients_all <- clean_patients_data(patients_raw)
+
+# all patients who haven't withdrew
+patients_clean <- patients_all %>%
+  filter(studyendreason %in% c("", NA))
+```
+
+
+```{r load_surveys, include=FALSE}
+# pull from the API
+surveys_raw <- get_df(foundry_token=token,
+             access_url_base=access_url_base,
+             api_url=surveys_url)
+
+surveys_clean <- clean_surveys_data(surveys_raw = surveys_raw,
+                                    patients_clean = patients_clean)
+
+# init. last updated timestamp for surveys
+last_updated_surveys <- surveys_clean %>% pull(recorded_dttm) %>% max()
+last_updated_surveys_fmt <- str_c("Last updated:", last_updated_surveys, current_tz, sep = " ")
+print(str_c("Surveys", last_updated_surveys_fmt, sep = " "))
+```
+
+
+```{r load_dictionary}
+# load the data dictionary
+dict <- readxl::read_excel("vigor_surveys_data_dictionary.xlsx")
+
+data_dict_clean <- dict %>%
+  rename(
+    # Clean column names for easier use
+    survey_type = `survey type`,
+    survey_topic = `survey topic`,
+    survey_display_name = `survey display name`,
+    step_readable = `step readable`,
+    question_readable = `result readable`,
+    possible_answers = `possible answers`
+  )
+
+
+# display survey topic summary
+survey_summary <- data_dict_clean %>%
+  group_by(survey_topic, survey_type) %>%
+  summarize(
+    n_questions = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(survey_topic, survey_type)
+
+kable(survey_summary,
+      format = "simple",
+      caption = "Survey Topics Overview",
+      col.names = c("Survey Topic", "Type", "# Questions"))
+```
+
+
+
+# Main Data Processing
+
+
+```{r process-main-data}
+# join survey responses with data dictionary
+surveys_enriched <- surveys_clean %>%
+  # filter out stress surveys
+  filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
+  left_join(data_dict_clean,
+            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+  # clean answers field (remove quotes and parse JSON-like strings)
+  mutate(
+    answer_clean = str_remove_all(answers, '^"|"$'),
+    answer_clean = case_when(
+      answer_clean == "true" ~ "Yes",
+      answer_clean == "false" ~ "No",
+      TRUE ~ answer_clean
+    ),
+    # Add time-based variables for longitudinal analysis
+    days_since_enrollment = as.numeric(recorded_date - as.Date(enroll_date)),
+  ) %>%
+  # Filter out rows without dictionary matches (administrative surveys)
+  filter(!is.na(survey_topic))  %>%
+  # Select key columns for analysis
+  select(
+    patient_id, FamilyID, 
+    # fam_pos, 
+    # vit_status_exp,
+    recorded_date, 
+    # recorded_dttm, 
+    enroll_date,
+    # days_since_enrollment, 
+    # survey_wave_exp, survey_period,
+    survey_topic, survey_display_name, survey_type,
+    # step_readable, 
+    question_readable,
+    answer_clean, 
+    possible_answers,
+    # invitation_status, enrolled, active_kitstatus
+  )
+
+survey_topics_names <- unique(surveys_enriched$survey_topic)
+
+cat("Enriched dataset shape:", nrow(surveys_enriched), "x", ncol(surveys_enriched), "\n")
+cat("Survey topics found:", paste(survey_topics_names, collapse = ", "), "\n")
+```
+
+
+
+```{r split-into-topics}
+get_topic <- function(topic) {
+  
+  # check if topic is valid
+  if (!(topic %in% survey_topics_names)) {
+    stop(
+      paste0("Error: '", topic_name, "' is not a recognized survey topic. ",
+             "Allowed topics are: ", paste(allowed_topics, collapse = ", "), ".")
+    )
+  }
+  
+  
+  topic_df <- surveys_enriched %>%
+    filter(survey_topic == topic) %>%
+    select(patient_id, FamilyID, recorded_date,
+           enroll_date, 
+           # days_since_enrollment,
+           # survey_wave, survey_period, 
+           survey_type,
+           question_readable,
+           answer_clean)
+  
+  return(topic_df)
+}
+
+# create DFs for each survey topic except stress
+env_df <- get_topic("environmental exposures") 
+health_df <- get_topic("general health")
+life_changes_df <- get_topic("life changes")
+skin_type_df <- get_topic("skin type")
+vitiligo_df <- get_topic("vitiligo")
+```
+
+
+```{r results='asis', echo=FALSE}
+cat("
+The data frame `surveys_enriched` shows all readable survey responses across all participants, timepoints, and topics, in long format.
+This means every individual question response is visible, with clear labels for who answered, what, and when.
+
+The following data frames present the same survey responses, but organized by major topic area:
+
+* `env_df`: Environmental exposure survey responses
+
+* `health_df`: General health and medical history responses
+
+* `life_changes_df`: Life changes and major events responses
+
+* `skin_type_df`: Participant skin/eye/hair characteristics (baseline only)
+
+* `vitiligo_df`: Vitiligo-specific questions and treatments
+
+")
+```
+
+
