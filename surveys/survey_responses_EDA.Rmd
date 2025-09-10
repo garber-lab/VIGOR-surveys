@@ -101,7 +101,7 @@ patients_clean <- patients_all %>%
 ```
 
 
-```{r load_surveys, include=FALSE}
+```{r load_surveys, include=FALSE, echo=TRUE}
 # pull from the API
 surveys_raw <- get_df(foundry_token=token,
              access_url_base=access_url_base,
@@ -153,9 +153,9 @@ kable(survey_summary,
 # Main Data Processing
 
 
-```{r process-main-data}
+```{r process-non-stress-data}
 # join survey responses with data dictionary
-surveys_enriched <- surveys_clean %>%
+surveys_enriched_no_stress <- surveys_clean %>%
   # filter out stress surveys
   filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
   left_join(data_dict_clean,
@@ -190,12 +190,95 @@ surveys_enriched <- surveys_clean %>%
     possible_answers,
     # invitation_status, enrolled, active_kitstatus
   )
+```
+
+
+```{r process-stress-data}
+# questions needing reverse score
+reverse_qs <- c(4, 5, 7, 8)
+
+# filter for stress surveys
+surveys_enriched_stress <- surveys_clean %>%
+  filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
+  left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
+            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+  # update survey type
+  mutate(
+    months_since_enroll = time_length(as_date(recorded_dttm) - as_date(enroll_date), unit = "month"),
+    survey_type = case_when(months_since_enroll < 2.9 ~ "BL",
+                            months_since_enroll >= 2.9 ~ "QT")
+  ) %>%
+  # clean answers field (remove quotes and parse JSON-like strings)
+  mutate(
+    answer_clean = str_remove_all(answers, '^"|"$'),
+    answer_clean = case_when(
+      answer_clean == "true" ~ "Yes",
+      answer_clean == "false" ~ "No",
+      TRUE ~ answer_clean
+    ),
+    # Add time-based variables for longitudinal analysis
+    days_since_enrollment = as.numeric(recorded_date - as.Date(enroll_date)),
+  ) %>%
+  # Filter out rows without dictionary matches (administrative surveys)
+  filter(!is.na(survey_topic))  %>%
+  # compute single stress score as per PSS directions
+  mutate(
+    stress_score = factor(answer_clean, 
+                          levels = c("never",
+                                     "almost never",
+                                     "sometimes",
+                                     "fairly often",
+                                     "very often"),
+                          labels = 0:4),
+    # reverse the score for Q4, 5, 7, and 8
+    stress_score_v2 = case_when(
+      str_extract(question_readable, "^\\d+") %in% as.character(reverse_qs) ~ fct_recode(
+        stress_score,
+        `0` = "4",
+        `1` = "3",
+        `2` = "2",
+        `3` = "1",
+        `4` = "0"
+      ),
+      .default = stress_score
+    )
+  ) %>%
+  # replace answer_clean and possible_answers with stress scores
+  mutate(
+    answer_clean = stress_score_v2,
+    possible_answers = str_flatten_comma(str_c(0:4))
+  ) %>%
+  # Select key columns for analysis
+  select(
+    patient_id, FamilyID, 
+    # fam_pos, 
+    # vit_status_exp,
+    recorded_date, 
+    # recorded_dttm, 
+    enroll_date,
+    # days_since_enrollment, 
+    # survey_wave_exp, survey_period,
+    survey_topic, survey_display_name, survey_type,
+    # step_readable, 
+    question_readable,
+    answer_clean, 
+    # stress_score_v2,
+    possible_answers,
+    # invitation_status, enrolled, active_kitstatus
+  )
+```
+
+
+```{r process-main-data}
+surveys_enriched <- bind_rows(surveys_enriched_no_stress, surveys_enriched_stress) %>%
+  arrange(patient_id, recorded_date, survey_topic)
 
 survey_topics_names <- unique(surveys_enriched$survey_topic)
 
 cat("Enriched dataset shape:", nrow(surveys_enriched), "x", ncol(surveys_enriched), "\n")
 cat("Survey topics found:", paste(survey_topics_names, collapse = ", "), "\n")
 ```
+
 
 
 
@@ -230,6 +313,11 @@ health_df <- get_topic("general health")
 life_changes_df <- get_topic("life changes")
 skin_type_df <- get_topic("skin type")
 vitiligo_df <- get_topic("vitiligo")
+stress_df <- get_topic("stress") %>%
+  summarize(
+    stress_score = sum(as.integer(answer_clean), na.rm = T),
+    .by = c(patient_id, FamilyID, recorded_date, enroll_date, survey_type)
+  )
 ```
 
 
@@ -249,6 +337,12 @@ The following data frames present the same survey responses, but organized by ma
 * `skin_type_df`: Participant skin/eye/hair characteristics (baseline only)
 
 * `vitiligo_df`: Vitiligo-specific questions and treatments
+
+* `stress_df`: Computed stress scores from a 10-question questionnaire (higher score = more stress)
+    - This DF slightly differs from the rest...
+        - Each row represents a participant's overall stress score at the time of submission (1 row per survey instead of 1 row per question)
+        - The field `stress_score` replaced `answer_clean`
+        - The field `question_readable` was removed
 
 ")
 ```
