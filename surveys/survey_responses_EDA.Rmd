@@ -128,16 +128,8 @@ data_dict_clean <- dict %>%
     survey_topic = `survey topic`,
     survey_display_name = `survey display name`,
     step_readable = `step readable`,
-    result_readable = `result readable`,
+    question_readable = `result readable`,
     possible_answers = `possible answers`
-  )
-
-# display summary of surveys
-dict %>%
-  group_by(survey_type, survey_topic, surveyname, survey_display_name) %>%
-  summarize(
-    n_questions = n_distinct(resultidentifier),
-    .groups = "drop"
   )
 
 
@@ -178,30 +170,25 @@ surveys_enriched <- surveys_clean %>%
     ),
     # Add time-based variables for longitudinal analysis
     days_since_enrollment = as.numeric(recorded_date - as.Date(enroll_date)),
-    # # expected survey wave based on 
-    # survey_wave_exp = case_when(
-    #   survey_type == "BL" ~ "Baseline",
-    #   days_since_enrollment <= 120 ~ "3-Month", 
-    #   days_since_enrollment <= 210 ~ "6-Month",
-    #   days_since_enrollment <= 300 ~ "9-Month",
-    #   days_since_enrollment <= 390 ~ "12-Month",
-    #   TRUE ~ "Later"
-    # ),
-    # # Create readable survey period
-    # survey_period = paste0(survey_wave, " (", survey_type, ")")
   ) %>%
   # Filter out rows without dictionary matches (administrative surveys)
   filter(!is.na(survey_topic))  %>%
   # Select key columns for analysis
   select(
-    patient_id, FamilyID, fam_pos, vit_status_exp,
-    recorded_date, recorded_dttm, enroll_date,
-    days_since_enrollment, 
+    patient_id, FamilyID, 
+    # fam_pos, 
+    # vit_status_exp,
+    recorded_date, 
+    # recorded_dttm, 
+    enroll_date,
+    # days_since_enrollment, 
     # survey_wave_exp, survey_period,
     survey_topic, survey_display_name, survey_type,
-    step_readable, result_readable, 
-    answer_clean, possible_answers,
-    invitation_status, enrolled, active_kitstatus
+    # step_readable, 
+    question_readable,
+    answer_clean, 
+    possible_answers,
+    # invitation_status, enrolled, active_kitstatus
   )
 
 survey_topics_names <- unique(surveys_enriched$survey_topic)
@@ -231,7 +218,7 @@ get_topic <- function(topic) {
            # days_since_enrollment,
            # survey_wave, survey_period, 
            survey_type,
-           result_readable,
+           question_readable,
            answer_clean)
   
   return(topic_df)
