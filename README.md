@@ -12,9 +12,9 @@ This repository provides a modular, standardized framework for querying, cleanin
 
 ## Repository Structure
 
-- **`credentials.R`**  
+- **`foundry_credentials.R`**  
   Contains API credentials and secrets loaded securely for authenticating with the Foundry platform.  
-  **Note:** The `.gitignore` file excludes the `credentials.R` file to protect sensitive information.  
+  **Note:** The `.gitignore` file excludes the `foundry_credentials.R` file to protect sensitive information.  
   The credentials file should be formatted like this:
 
   ```r
