@@ -84,6 +84,8 @@ print(last_updated_fdry_fmt)
 ```
 
 
+## Participants
+
 ```{r load_participants, include=FALSE}
 # pull from the API
 patients_raw <- get_df(
@@ -101,6 +103,8 @@ patients_clean <- patients_all %>%
 ```
 
 
+## Surveys
+
 ```{r load_surveys, include=FALSE, echo=TRUE}
 # pull from the API
 surveys_raw <- get_df(foundry_token=token,
@@ -116,6 +120,9 @@ last_updated_surveys_fmt <- str_c("Last updated:", last_updated_surveys, current
 print(str_c("Surveys", last_updated_surveys_fmt, sep = " "))
 ```
 
+
+
+## Data Dictionary
 
 ```{r load_dictionary}
 # load the data dictionary
@@ -147,6 +154,17 @@ kable(survey_summary,
       caption = "Survey Topics Overview",
       col.names = c("Survey Topic", "Type", "# Questions"))
 ```
+
+
+```{r load_dictionary_TEST, eval=FALSE}
+# # load the data dictionary
+# dict_raw <- readxl::read_excel("vigor_surveys_data_dictionary_11SEPT2025.xlsx")
+
+
+# display summary of surveys with versions from mapping file
+
+```
+
 
 
 
@@ -202,6 +220,10 @@ surveys_enriched_stress <- surveys_clean %>%
   filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
   left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
             by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+  # arrange by patient ID, recorded dttm, and question
+  arrange(patient_id, recorded_dttm, question_readable) %>%
+  # remove any duplicate records from the same patient on the same day 
+  distinct(patient_id, recorded_date, question_readable, .keep_all = T) %>%
   # update survey type
   mutate(
     months_since_enroll = time_length(as_date(recorded_dttm) - as_date(enroll_date), unit = "month"),
