@@ -16,6 +16,9 @@ fitbit/sample_fitbit_takeout_data/*
 # User-specific files
 .Ruserdata
 
+#compile files
+*.nb.html
+
 # Example code in package build process
 *-Ex.R
 
