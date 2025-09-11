@@ -1,0 +1,459 @@
+---
+title: "Pull Survey Responses"
+author: "Thomas Jacob"
+date: "Created Sept 9, 2025 \nLast opened: `r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_notebook:
+    toc: yes
+---
+
+# Initialization
+
+```{r load_pkgs, include=TRUE}
+if(!require(tidyverse)){
+  install.packages("tidyverse")
+  library(tidyverse)
+}
+
+if(!require(httr)){
+  install.packages("httr")
+  library(httr)
+}
+
+if(!require(jsonlite)){
+  install.packages("jsonlite")
+  library(jsonlite)
+}
+
+if(!require(here)){
+  install.packages("here")
+  # library(here)
+}
+
+if(!require(readxl)){
+  install.packages("readxl")
+  # library(readxl)
+}
+
+if(!require(knitr)){
+  install.packages("knitr")
+  library(knitr)
+}
+
+if(!require(DT)){
+  install.packages("DT")
+  library(DT)
+}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(forcats)
+library(scales)
+```
+
+
+```{r set_here_root, include=FALSE}
+# set the directory with the credentials file as the anchor point
+here::i_am("foundry_credentials.R")
+```
+
+
+```{r set_credentials, include=FALSE}
+# load Foundry API credentials from file
+source(here::here("foundry_credentials.R"))
+
+# load constants
+source(here::here("constants.R"))
+
+# load querying functions
+source(here::here("query_functions.R"))
+
+# load survey cleaning functions
+source(here::here("surveys", "survey_functions.R"))
+```
+
+
+# Load Data
+
+```{r initiate_foundry_session, include=FALSE}
+token <- init_foundry_session(email=email,
+                     password=password,
+                     access_url = access_url)
+```
+
+
+```{r last_updated_pt, include=FALSE, echo=TRUE}
+last_updated_fdry <- get_time_fountry_last_updated(formatted=FALSE)
+last_updated_fdry_fmt <- get_time_fountry_last_updated(formatted = TRUE)
+print(last_updated_fdry_fmt)
+```
+
+
+```{r load_participants, include=FALSE}
+# pull from the API
+patients_raw <- get_df(
+  foundry_token = token,
+  access_url_base = access_url_base,
+  api_url = patients_url
+)
+
+# clean the patients DF
+patients_all <- clean_patients_data(patients_raw)
+
+# all patients who haven't withdrew
+patients_clean <- patients_all %>%
+  filter(studyendreason %in% c("", NA))
+```
+
+
+```{r load_surveys, include=FALSE}
+# pull from the API
+surveys_raw <- get_df(foundry_token=token,
+             access_url_base=access_url_base,
+             api_url=surveys_url)
+
+surveys_clean <- clean_surveys_data(surveys_raw = surveys_raw,
+                                    patients_clean = patients_clean)
+
+# init. last updated timestamp for surveys
+last_updated_surveys <- surveys_clean %>% pull(recorded_dttm) %>% max()
+last_updated_surveys_fmt <- str_c("Last updated:", last_updated_surveys, current_tz, sep = " ")
+print(str_c("Surveys", last_updated_surveys_fmt, sep = " "))
+```
+
+
+```{r load_dictionary}
+# load the data dictionary
+dict <- readxl::read_excel("vigor_surveys_data_dictionary.xlsx")
+
+data_dict_clean <- dict %>%
+  rename(
+    # Clean column names for easier use
+    survey_type = `survey type`,
+    survey_topic = `survey topic`,
+    survey_display_name = `survey display name`,
+    step_readable = `step readable`,
+    question_readable = `result readable`,
+    possible_answers = `possible answers`
+  )
+
+
+# display survey topic summary
+survey_summary <- data_dict_clean %>%
+  group_by(survey_topic, survey_type) %>%
+  summarize(
+    n_questions = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(survey_topic, survey_type)
+
+kable(survey_summary,
+      format = "simple",
+      caption = "Survey Topics Overview",
+      col.names = c("Survey Topic", "Type", "# Questions"))
+```
+
+
+
+# Main Data Processing
+
+
+```{r process-main-data}
+# join survey responses with data dictionary
+surveys_enriched <- surveys_clean %>%
+  # filter out stress surveys
+  filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
+  left_join(data_dict_clean,
+            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+  # clean answers field (remove quotes and parse JSON-like strings)
+  mutate(
+    answer_clean = str_remove_all(answers, '^"|"$'),
+    answer_clean = case_when(
+      answer_clean == "true" ~ "Yes",
+      answer_clean == "false" ~ "No",
+      TRUE ~ answer_clean
+    ),
+    # Add time-based variables for longitudinal analysis
+    days_since_enrollment = as.numeric(recorded_date - as.Date(enroll_date)),
+  ) %>%
+  # Filter out rows without dictionary matches (administrative surveys)
+  filter(!is.na(survey_topic))  %>%
+  # Select key columns for analysis
+  select(
+    patient_id, FamilyID, 
+    # fam_pos, 
+    # vit_status_exp,
+    recorded_date, 
+    # recorded_dttm, 
+    enroll_date,
+    # days_since_enrollment, 
+    # survey_wave_exp, survey_period,
+    survey_topic, survey_display_name, survey_type,
+    # step_readable, 
+    question_readable,
+    answer_clean, 
+    possible_answers,
+    # invitation_status, enrolled, active_kitstatus
+  )
+
+survey_topics_names <- unique(surveys_enriched$survey_topic)
+
+cat("Enriched dataset shape:", nrow(surveys_enriched), "x", ncol(surveys_enriched), "\n")
+cat("Survey topics found:", paste(survey_topics_names, collapse = ", "), "\n")
+```
+
+
+
+```{r split-into-topics}
+get_topic <- function(topic) {
+  
+  # check if topic is valid
+  if (!(topic %in% survey_topics_names)) {
+    stop(
+      paste0("Error: '", topic_name, "' is not a recognized survey topic. ",
+             "Allowed topics are: ", paste(allowed_topics, collapse = ", "), ".")
+    )
+  }
+  
+  
+  topic_df <- surveys_enriched %>%
+    filter(survey_topic == topic) %>%
+    select(patient_id, FamilyID, recorded_date,
+           enroll_date, 
+           # days_since_enrollment,
+           # survey_wave, survey_period, 
+           survey_type,
+           question_readable,
+           answer_clean)
+  
+  return(topic_df)
+}
+
+# create DFs for each survey topic except stress
+env_df <- get_topic("environmental exposures") 
+health_df <- get_topic("general health")
+life_changes_df <- get_topic("life changes")
+skin_type_df <- get_topic("skin type")
+vitiligo_df <- get_topic("vitiligo")
+```
+
+
+```{r results='asis', echo=FALSE}
+cat("
+The data frame `surveys_enriched` shows all readable survey responses across all participants, timepoints, and topics, in long format.
+This means every individual question response is visible, with clear labels for who answered, what, and when.
+
+The following data frames present the same survey responses, but organized by major topic area:
+
+* `env_df`: Environmental exposure survey responses
+
+* `health_df`: General health and medical history responses
+
+* `life_changes_df`: Life changes and major events responses
+
+* `skin_type_df`: Participant skin/eye/hair characteristics (baseline only)
+
+* `vitiligo_df`: Vitiligo-specific questions and treatments
+
+")
+```
+
+```{r vitiligo_survey}
+# First clean up answers
+vitiligo_df <- vitiligo_df %>%
+  mutate(
+    answer_clean = case_when(
+      survey_type == "BL" &
+        question_readable == "Have your existing spots changed in the last 3 months (shrinking or growing)?" &
+        answer_clean == "no_change" ~ "no change",
+      TRUE ~ answer_clean
+    )
+  )
+```
+
+```{r vitiligo_survey_exploratory}
+answers_per_participant <- vitiligo_df %>%
+  # clean blanks; treat "" and literal "NA" as missing
+  mutate(answer_clean = str_squish(answer_clean),
+         answer_clean = na_if(answer_clean, ""),
+         answer_clean = na_if(answer_clean, "NA")) %>%
+  # explode multi-selects like "Topical steroids; Phototherapy"
+  separate_rows(answer_clean, sep = "\\s*[,;]\\s*") %>%
+  filter(!is.na(answer_clean)) %>%
+  group_by(FamilyID, patient_id) %>%
+  summarise(
+    n_unique_answers   = n_distinct(answer_clean),
+    n_total_responses  = n(),                              # optional: total rows after splitting
+    n_unique_questions = n_distinct(question_readable),    # optional: distinct questions answered
+    .groups = "drop"
+  ) %>%
+  arrange(FamilyID, patient_id)
+
+answers_per_participant
+
+```
+```{r plotting_vitiligo1}
+# 1) Parse recorded_date to a pure Date (ignore time-of-day)
+vitiligo_clean <- vitiligo_df %>%
+  mutate(
+    # Try multiple formats; coalesce the first that works
+    rec_dt = dplyr::coalesce(
+      suppressWarnings(lubridate::ymd_hms(recorded_date, quiet = TRUE)),
+      suppressWarnings(lubridate::ymd(recorded_date, quiet = TRUE)),
+      suppressWarnings(lubridate::mdy_hms(recorded_date, quiet = TRUE)),
+      suppressWarnings(lubridate::mdy(recorded_date, quiet = TRUE)),
+      suppressWarnings(lubridate::dmy_hms(recorded_date, quiet = TRUE)),
+      suppressWarnings(lubridate::dmy(recorded_date, quiet = TRUE)),
+      # If it's already Date/POSIXct, as_datetime/as_date will just work
+      suppressWarnings(as_datetime(recorded_date))
+    ),
+    rec_date = as.Date(rec_dt)
+  ) %>%
+  filter(!is.na(rec_date))
+
+# 2) Count distinct recorded dates per participant per question
+dates_per_q <- vitiligo_clean %>%
+  group_by(FamilyID, patient_id, question_readable) %>%
+  summarise(n_distinct_dates = n_distinct(rec_date), .groups = "drop")
+
+# 3) Make a nice participant label and sort by FamilyID then patient_id
+dates_per_q <- vitiligo_clean %>%
+  group_by(FamilyID, patient_id, question_readable) %>%
+  summarise(n_distinct_dates = n_distinct(rec_date), .groups = "drop") %>%
+  arrange(FamilyID, patient_id, question_readable) %>%
+  mutate(
+    participant_label = fct_inorder(patient_id)  # lock y-axis to current order
+  )
+
+ggplot(dates_per_q,
+       aes(x = question_readable, y = participant_label, fill = n_distinct_dates)) +
+  geom_tile() +
+  scale_fill_gradient(name = "# distinct dates", low = "white", high = "steelblue") +
+  labs(x = "Question", y = "Participant (sorted by FamilyID)") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1),
+        panel.grid = element_blank())
+
+
+```
+
+
+Now that we have a sense of what the data is, let us try to figure out whether we got many new spots since we began
+
+```{r plotting_vitiligo2}
+vitiligo_df %>%
+  filter(question_readable == "Have your existing spots changed in the last 3 months (shrinking or growing)?") %>%
+  count(survey_type, answer_clean) %>%
+  ggplot(aes(x = answer_clean, y = n, fill = survey_type)) +
+  geom_col(position = "dodge", color = "black") +
+  scale_fill_manual(values = c("BL" = "black", "QT" = "gray60")) +
+  labs(x = "Answer", y = "Count") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+mode_chr <- function(x) names(which.max(table(x)))
+
+treating_status <- vitiligo_df %>%
+  filter(question_readable == "Are you currently treating your vitiligo?") %>%
+  transmute(patient_id, survey_type,
+            treating = case_when(
+              str_to_lower(answer_clean) == "yes" ~ "Yes",
+              str_to_lower(answer_clean) == "no"  ~ "No",
+              TRUE ~ NA_character_
+            )) %>%
+  filter(!is.na(treating)) %>%
+  group_by(patient_id, survey_type) %>%
+  summarise(treating = mode_chr(treating), .groups = "drop")   # 1 row per person×survey
+
+arrange(recorded_at, .by_group = TRUE) %>% slice_tail(n = 1)
+
+plot_df <- vitiligo_df %>%
+  filter(question_readable == "Have your existing spots changed in the last 3 months (shrinking or growing)?") %>%
+  transmute(patient_id, survey_type,
+            answer = recode(answer_clean,
+                            "no_change" = "No change")) %>%      # normalize label
+  left_join(treating_status, by = c("patient_id","survey_type")) %>%
+  # keep all rows; mark missing treating as "Unknown" (optional)
+  mutate(treating = tidyr::replace_na(treating, "Unknown")) %>%
+  count(survey_type, answer, treating)
+
+ggplot(plot_df, aes(x = answer, y = n, fill = treating)) +
+  geom_col(color = "black", width = 0.8) +
+  facet_wrap(~ survey_type, nrow = 1) +
+  scale_fill_manual(values = c("Yes" = "black", "No" = "gray60", "Unknown" = "white")) +
+  labs(x = "Answer", y = "Count", fill = "Treating?") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+
+```
+
+```{r vitiligo_new_spots, R.options=}
+q1_txt  <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
+q12_txt <- "Do you have vitiligo?"
+
+norm_yesno <- function(x) {
+  s <- str_to_lower(str_squish(as.character(x)))
+  dplyr::case_when(
+    str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
+    str_detect(s, "^(no|n|false|0)$") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+# --- 1) Baseline (BL) vitiligo status per participant from Q12 ---
+bl_status <- vitiligo_df %>%
+  filter(question_readable == q12_txt, toupper(survey_type) == "BL") %>%
+  transmute(patient_id, has_vitiligo_bl = norm_yesno(answer_clean)) %>%
+  distinct(patient_id, .keep_all = TRUE) %>%
+  mutate(has_vitiligo_bl = fct_explicit_na(has_vitiligo_bl, "Unknown"))
+
+# --- 2) Did they EVER report new white spots on Q1? (across BL/QT) ---
+q1_ever <- vitiligo_df %>%
+  filter(question_readable == q1_txt) %>%
+  transmute(patient_id, q1 = norm_yesno(answer_clean)) %>%
+  group_by(patient_id) %>%
+  summarise(ever_yes = any(q1 == "Yes", na.rm = TRUE), .groups = "drop")
+
+# --- 3) Join + summarise by baseline group ---
+summary_df <- bl_status %>%
+  full_join(q1_ever, by = "patient_id") %>%
+  mutate(
+    ever_yes = replace_na(ever_yes, FALSE),
+    has_vitiligo_bl = fct_relevel(has_vitiligo_bl, "Yes", "No", "Unknown")
+  )
+
+yes_summary <- summary_df %>%
+  group_by(has_vitiligo_bl) %>%
+  summarise(
+    n_total = n(),
+    n_yes   = sum(ever_yes),
+    pct_yes = n_yes / n_total,
+    .groups = "drop"
+  )
+
+# --- 4) Plot with explicit denominators in the labels ---
+ggplot(yes_summary, aes(x = has_vitiligo_bl, y = n_yes, fill = has_vitiligo_bl)) +
+  geom_col(color = "black", width = 0.8) +
+  geom_text(aes(label = paste0(n_yes, " / ", n_total, " (", percent(pct_yes), ")")),
+            vjust = -0.35, size = 4) +
+  scale_fill_manual(values = c("Yes" = "black", "No" = "gray60", "Unknown" = "white")) +
+  labs(
+    title = "Participants who EVER reported new white spots (Q1), by baseline vitiligo status",
+    x = "Baseline vitiligo (from BL Q12)",
+    y = "Number of participants"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# --- 5) Baseline counts table you asked for ---
+bl_counts <- yes_summary %>%
+  select(has_vitiligo_bl, n_total) %>%
+  arrange(has_vitiligo_bl)
+bl_counts
+```
