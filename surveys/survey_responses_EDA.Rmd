@@ -124,45 +124,52 @@ print(str_c("Surveys", last_updated_surveys_fmt, sep = " "))
 
 ## Data Dictionary
 
-```{r load_dictionary}
+
+```{r load_dictionary, echo=TRUE}
 # load the data dictionary
-dict <- readxl::read_excel("vigor_surveys_data_dictionary.xlsx")
+data_dictionary <- readxl::read_excel("vigor_surveys_data_dictionary_11SEPT2025.xlsx")
 
-data_dict_clean <- dict %>%
+
+# clean and rename the columns in data dictionary for easier joining
+data_dict_clean <- data_dictionary %>%
   rename(
-    # Clean column names for easier use
-    survey_type = `survey type`,
-    survey_topic = `survey topic`,
-    survey_display_name = `survey display name`,
-    step_readable = `step readable`,
-    question_readable = `result readable`,
-    possible_answers = `possible answers`
-  )
+    question_readable = questiontext,
+    answer_format = answerformat,
+    possible_answers = answerchoices
+  ) %>%
+  mutate(surveyversion = as.character(surveyversion)) %>%
+  # create a comprehensive lookup key including version
+  select(surveyname, surveyversion, stepidentifier, resultidentifier,
+         survey_type, survey_topic, step_readable, question_readable,
+         possible_answers)
 
-
-# display survey topic summary
+# display survey topic and version summary
 survey_summary <- data_dict_clean %>%
+  group_by(survey_topic, survey_type, surveyversion) %>%
+  summarize(total_questions = n(),
+            .groups = "drop") %>%
+  arrange(survey_topic, survey_type, desc(as.integer(surveyversion)))
+
+kable(survey_summary,
+      format = "simple",
+      caption = "Survey Topics Overview by Type and Version",
+      col.names = c("Survey Topic", "Type", "Version", "# Questions"))
+
+
+# also show high-level summary w/o versions
+survey_summary_no_version <- data_dict_clean %>%
   group_by(survey_topic, survey_type) %>%
   summarize(
-    n_questions = n(),
+    total_questions = n(),
+    versions = paste(unique(surveyversion), collapse = ", "),
     .groups = "drop"
   ) %>%
   arrange(survey_topic, survey_type)
 
-kable(survey_summary,
+kable(survey_summary_no_version,
       format = "simple",
-      caption = "Survey Topics Overview",
-      col.names = c("Survey Topic", "Type", "# Questions"))
-```
-
-
-```{r load_dictionary_TEST, eval=FALSE}
-# # load the data dictionary
-# dict_raw <- readxl::read_excel("vigor_surveys_data_dictionary_11SEPT2025.xlsx")
-
-
-# display summary of surveys with versions from mapping file
-
+      caption = "Survey Topics Overview by Type (All Versions)",
+      col.names = c("Survey Topic", "Type", "Total Questions", "Versions Available"))
 ```
 
 
@@ -171,13 +178,14 @@ kable(survey_summary,
 # Main Data Processing
 
 
+
 ```{r process-non-stress-data}
 # join survey responses with data dictionary
 surveys_enriched_no_stress <- surveys_clean %>%
   # filter out stress surveys
   filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
   left_join(data_dict_clean,
-            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+            by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
   # clean answers field (remove quotes and parse JSON-like strings)
   mutate(
     answer_clean = str_remove_all(answers, '^"|"$'),
@@ -201,7 +209,10 @@ surveys_enriched_no_stress <- surveys_clean %>%
     enroll_date,
     # days_since_enrollment, 
     # survey_wave_exp, survey_period,
-    survey_topic, survey_display_name, survey_type,
+    survey_topic, 
+    survey_display_name=surveydisplayname, 
+    surveyversion,
+    survey_type,
     # step_readable, 
     question_readable,
     answer_clean, 
@@ -219,7 +230,7 @@ reverse_qs <- c(4, 5, 7, 8)
 surveys_enriched_stress <- surveys_clean %>%
   filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
   left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
-            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+            by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
   # arrange by patient ID, recorded dttm, and question
   arrange(patient_id, recorded_dttm, question_readable) %>%
   # remove any duplicate records from the same patient on the same day 
@@ -280,7 +291,10 @@ surveys_enriched_stress <- surveys_clean %>%
     enroll_date,
     # days_since_enrollment, 
     # survey_wave_exp, survey_period,
-    survey_topic, survey_display_name, survey_type,
+    survey_topic, 
+    survey_display_name=surveydisplayname, 
+    surveyversion,
+    survey_type,
     # step_readable, 
     question_readable,
     answer_clean, 
