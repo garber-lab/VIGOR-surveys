@@ -138,9 +138,20 @@ data_dict_clean <- data_dictionary %>%
     possible_answers = answerchoices
   ) %>%
   mutate(surveyversion = as.character(surveyversion)) %>%
+  # normalize question text for Ad Hoc questions
+  mutate(
+    question_standardized = case_when(
+      resultidentifier == "new_spots_adhoc" ~ "Have you noticed any new white spots on your skin that you think can be vitiligo or improvement (repigmentation) of your vitiligo?",
+      resultidentifier == "new_spots_duration" ~ "How long ago did you notice your new white spots?",
+      resultidentifier == "vitiligo_location1_adhoc" ~ "Where is your vitiligo located? Please include the new spot you're currently reporting.\n\n*Select all that apply*",
+      .default = question_readable
+    )
+  ) %>%
   # create a comprehensive lookup key including version
   select(surveyname, surveyversion, stepidentifier, resultidentifier,
-         survey_type, survey_topic, step_readable, question_readable,
+         survey_type, survey_topic, step_readable,
+         question_standardized, 
+         # question_readable,
          possible_answers)
 
 # display survey topic and version summary
@@ -202,6 +213,9 @@ surveys_enriched_no_stress <- surveys_clean %>%
   # Select key columns for analysis
   select(
     patient_id, FamilyID, 
+    age,
+    vitiligo_status,
+    raffle_points=total_points,
     # fam_pos, 
     # vit_status_exp,
     recorded_date, 
@@ -214,7 +228,9 @@ surveys_enriched_no_stress <- surveys_clean %>%
     surveyversion,
     survey_type,
     # step_readable, 
-    question_readable,
+    # resultidentifier,
+    # question_readable,
+    question_standardized,
     answer_clean, 
     possible_answers,
     # invitation_status, enrolled, active_kitstatus
@@ -232,9 +248,9 @@ surveys_enriched_stress <- surveys_clean %>%
   left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
             by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
   # arrange by patient ID, recorded dttm, and question
-  arrange(patient_id, recorded_dttm, question_readable) %>%
+  arrange(patient_id, recorded_dttm, question_standardized) %>%
   # remove any duplicate records from the same patient on the same day 
-  distinct(patient_id, recorded_date, question_readable, .keep_all = T) %>%
+  distinct(patient_id, recorded_date, question_standardized, .keep_all = T) %>%
   # update survey type
   mutate(
     months_since_enroll = time_length(as_date(recorded_dttm) - as_date(enroll_date), unit = "month"),
@@ -265,7 +281,7 @@ surveys_enriched_stress <- surveys_clean %>%
                           labels = 0:4),
     # reverse the score for Q4, 5, 7, and 8
     stress_score_v2 = case_when(
-      str_extract(question_readable, "^\\d+") %in% as.character(reverse_qs) ~ fct_recode(
+      str_extract(question_standardized, "^\\d+") %in% as.character(reverse_qs) ~ fct_recode(
         stress_score,
         `0` = "4",
         `1` = "3",
@@ -284,6 +300,9 @@ surveys_enriched_stress <- surveys_clean %>%
   # Select key columns for analysis
   select(
     patient_id, FamilyID, 
+    age,
+    vitiligo_status,
+    raffle_points=total_points,
     # fam_pos, 
     # vit_status_exp,
     recorded_date, 
@@ -296,7 +315,9 @@ surveys_enriched_stress <- surveys_clean %>%
     surveyversion,
     survey_type,
     # step_readable, 
-    question_readable,
+    # resultidentifier,
+    # question_readable,
+    question_standardized,
     answer_clean, 
     # stress_score_v2,
     possible_answers,
@@ -332,14 +353,21 @@ get_topic <- function(topic) {
   
   topic_df <- surveys_enriched %>%
     filter(survey_topic == topic) %>%
-    select(patient_id, FamilyID, recorded_date,
-           enroll_date, 
-           # days_since_enrollment,
-           # survey_wave, survey_period, 
-           surveyversion,
-           survey_type,
-           question_readable,
-           answer_clean)
+    select(
+      patient_id,
+      FamilyID,
+      age,
+      vitiligo_status,
+      raffle_points,
+      recorded_date,
+      enroll_date,
+      # days_since_enrollment,
+      # survey_wave, survey_period,
+      surveyversion,
+      survey_type,
+      question_standardized,
+      answer_clean
+    )
   
   return(topic_df)
 }
