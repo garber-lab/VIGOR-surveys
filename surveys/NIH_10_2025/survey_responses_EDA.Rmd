@@ -51,6 +51,8 @@ library(lubridate)
 library(ggplot2)
 library(forcats)
 library(scales)
+library(diptest)
+library(multimode)
 ```
 
 
@@ -126,7 +128,8 @@ print(str_c("Surveys", last_updated_surveys_fmt, sep = " "))
 
 ```{r load_dictionary}
 # load the data dictionary
-dict <- readxl::read_excel("vigor_surveys_data_dictionary.xlsx")
+datadictionaryPath = paste( here(),"surveys", "vigor_surveys_data_dictionary.xlsx",sep = "/")
+dict <- readxl::read_excel(datadictionaryPath)
 
 data_dict_clean <- dict %>%
   rename(
@@ -159,10 +162,9 @@ kable(survey_summary,
 
 # Main Data Processing
 
-
-```{r process-main-data}
+```{r process-non-stress-data}
 # join survey responses with data dictionary
-surveys_enriched <- surveys_clean %>%
+surveys_enriched_no_stress <- surveys_clean %>%
   # filter out stress surveys
   filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
   left_join(data_dict_clean,
@@ -197,12 +199,95 @@ surveys_enriched <- surveys_clean %>%
     possible_answers,
     # invitation_status, enrolled, active_kitstatus
   )
+```
+
+
+```{r process-stress-data}
+# questions needing reverse score
+reverse_qs <- c(4, 5, 7, 8)
+
+# filter for stress surveys
+surveys_enriched_stress <- surveys_clean %>%
+  filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
+  left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
+            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+  # update survey type
+  mutate(
+    months_since_enroll = time_length(as_date(recorded_dttm) - as_date(enroll_date), unit = "month"),
+    survey_type = case_when(months_since_enroll < 2.9 ~ "BL",
+                            months_since_enroll >= 2.9 ~ "QT")
+  ) %>%
+  # clean answers field (remove quotes and parse JSON-like strings)
+  mutate(
+    answer_clean = str_remove_all(answers, '^"|"$'),
+    answer_clean = case_when(
+      answer_clean == "true" ~ "Yes",
+      answer_clean == "false" ~ "No",
+      TRUE ~ answer_clean
+    ),
+    # Add time-based variables for longitudinal analysis
+    days_since_enrollment = as.numeric(recorded_date - as.Date(enroll_date)),
+  ) %>%
+  # Filter out rows without dictionary matches (administrative surveys)
+  filter(!is.na(survey_topic))  %>%
+  # compute single stress score as per PSS directions
+  mutate(
+    stress_score = factor(answer_clean, 
+                          levels = c("never",
+                                     "almost never",
+                                     "sometimes",
+                                     "fairly often",
+                                     "very often"),
+                          labels = 0:4),
+    # reverse the score for Q4, 5, 7, and 8
+    stress_score_v2 = case_when(
+      str_extract(question_readable, "^\\d+") %in% as.character(reverse_qs) ~ fct_recode(
+        stress_score,
+        `0` = "4",
+        `1` = "3",
+        `2` = "2",
+        `3` = "1",
+        `4` = "0"
+      ),
+      .default = stress_score
+    )
+  ) %>%
+  # replace answer_clean and possible_answers with stress scores
+  mutate(
+    answer_clean = stress_score_v2,
+    possible_answers = str_flatten_comma(str_c(0:4))
+  ) %>%
+  # Select key columns for analysis
+  select(
+    patient_id, FamilyID, 
+    # fam_pos, 
+    # vit_status_exp,
+    recorded_date, 
+    # recorded_dttm, 
+    enroll_date,
+    # days_since_enrollment, 
+    # survey_wave_exp, survey_period,
+    survey_topic, survey_display_name, survey_type,
+    # step_readable, 
+    question_readable,
+    answer_clean, 
+    # stress_score_v2,
+    possible_answers,
+    # invitation_status, enrolled, active_kitstatus
+  )
+```
+
+
+```{r process-main-data}
+surveys_enriched <- bind_rows(surveys_enriched_no_stress, surveys_enriched_stress) %>%
+  arrange(patient_id, recorded_date, survey_topic)
 
 survey_topics_names <- unique(surveys_enriched$survey_topic)
 
 cat("Enriched dataset shape:", nrow(surveys_enriched), "x", ncol(surveys_enriched), "\n")
 cat("Survey topics found:", paste(survey_topics_names, collapse = ", "), "\n")
 ```
+
 
 
 
@@ -237,6 +322,11 @@ health_df <- get_topic("general health")
 life_changes_df <- get_topic("life changes")
 skin_type_df <- get_topic("skin type")
 vitiligo_df <- get_topic("vitiligo")
+stress_df <- get_topic("stress") %>%
+  summarize(
+    stress_score = sum(as.integer(answer_clean), na.rm = T),
+    .by = c(patient_id, FamilyID, recorded_date, enroll_date, survey_type)
+  )
 ```
 
 
@@ -256,6 +346,12 @@ The following data frames present the same survey responses, but organized by ma
 * `skin_type_df`: Participant skin/eye/hair characteristics (baseline only)
 
 * `vitiligo_df`: Vitiligo-specific questions and treatments
+
+* `stress_df`: Computed stress scores from a 10-question questionnaire (higher score = more stress)
+    - This DF slightly differs from the rest...
+        - Each row represents a participant's overall stress score at the time of submission (1 row per survey instead of 1 row per question)
+        - The field `stress_score` replaced `answer_clean`
+        - The field `question_readable` was removed
 
 ")
 ```
@@ -456,4 +552,361 @@ bl_counts <- yes_summary %>%
   select(has_vitiligo_bl, n_total) %>%
   arrange(has_vitiligo_bl)
 bl_counts
+```
+
+
+```{r violins_bl_vs_qt_ttests_counts, message=FALSE, warning=FALSE}
+
+q1_txt  <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
+q12_txt <- "Do you have vitiligo?"
+
+norm_yesno <- function(x) {
+  s <- str_to_lower(str_squish(as.character(x)))
+  dplyr::case_when(
+    str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
+    str_detect(s, "^(no|n|false|0)$") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+# Q12 Yes on the same date
+q12_yes_by_date <- vitiligo_df %>%
+  filter(question_readable == q12_txt) %>%
+  transmute(patient_id, recorded_date, has_vitiligo = norm_yesno(answer_clean)) %>%
+  filter(has_vitiligo == "Yes") %>%
+  distinct(patient_id, recorded_date)
+
+# Q1 (new white spots) reduced to Yes/No per patient-date
+q1_by_date <- vitiligo_df %>%
+  filter(question_readable == q1_txt) %>%
+  transmute(patient_id, recorded_date, q1_newspots = norm_yesno(answer_clean)) %>%
+  filter(!is.na(q1_newspots)) %>%
+  group_by(patient_id, recorded_date) %>%
+  summarise(q1_newspots = ifelse(any(q1_newspots == "Yes"), "Yes", "No"),
+            .groups = "drop")
+
+# Stress on same date + tidy survey_type
+stress_on_date <- stress_df %>%
+  transmute(patient_id, recorded_date,
+            survey_type = recode(str_to_upper(str_squish(survey_type)),
+                                 "BASELINE"="BL", "QUARTERLY"="QT",
+                                 "QUARTERLY CHECK-IN"="QT", "QTR"="QT",
+                                 .default = str_to_upper(survey_type)),
+            stress_score)
+
+# Build analysis df: same-day Q12==Yes, Q1 answer present, stress present
+anal_df <- q1_by_date %>%
+  inner_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  inner_join(stress_on_date,  by = c("patient_id","recorded_date")) %>%
+  mutate(q1_newspots = factor(q1_newspots, levels = c("No","Yes")))
+
+# ---- main plot (your colors, stronger box outline so median pops) ----
+p <- ggplot(anal_df, aes(x = q1_newspots, y = stress_score, fill = q1_newspots)) +
+  geom_violin(trim = FALSE, alpha = 0.7, width = 0.9) +
+  geom_boxplot(width = 0.14, outlier.shape = NA, color = "black", linewidth = 0.5) +
+  scale_fill_manual(values = c("No" = "gray60", "Yes" = "tan")) +
+  facet_wrap(~ survey_type, nrow = 1) +
+  scale_x_discrete(drop = FALSE) +
+  labs(
+    title = "Stress vs. ‘new white spots?’ by survey type (same day, Q12 = Yes)",
+    x = "Answered ‘new white spots?’", y = "Stress score"
+  ) +
+  geom_hline(yintercept = 13, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 26, linetype = "dashed", color = "blue") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  # add headroom for annotations
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.18)))
+
+# ---- add n per group per panel ----
+counts <- anal_df %>%
+  count(survey_type, q1_newspots, name = "n") %>%
+  tidyr::complete(survey_type, q1_newspots, fill = list(n = 0)) %>%
+  mutate(x = as.numeric(factor(q1_newspots, levels = c("No","Yes"))))
+
+ymax <- anal_df %>%
+  group_by(survey_type) %>%
+  summarise(y_top = max(stress_score, na.rm = TRUE), .groups = "drop")
+
+ann_n <- counts %>%
+  left_join(ymax, by = "survey_type") %>%
+  mutate(y = y_top + 0.05 * y_top)
+
+p <- p + geom_text(data = ann_n,
+                   aes(x = x, y = y, label = paste0("n = ", n)),
+                   inherit.aes = FALSE, size = 3.3)
+
+# ---- Welch t-tests per panel + bracketed p-values ----
+# replace your format_p with a vectorized version
+format_p <- function(p) {
+  dplyr::case_when(
+    is.na(p)        ~ "p = NA",
+    p < 1e-4        ~ "p < 1e-4",
+    TRUE            ~ sprintf("p = %.3f", p)
+  )
+}
+
+ttests <- anal_df %>%
+  group_by(survey_type) %>%
+  summarise(
+    n_yes = sum(q1_newspots == "Yes"),
+    n_no  = sum(q1_newspots == "No"),
+    p_val = {
+      if (n_yes > 1 && n_no > 1) {
+        out <- try(t.test(stress_score ~ q1_newspots,
+                          data = cur_data(), var.equal = FALSE), silent = TRUE)
+        if (inherits(out, "try-error")) NA_real_ else out$p.value
+      } else NA_real_
+    },
+    y_top = max(stress_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label  = paste0("Welch t-test, ", format_p(p_val)),
+    y_bar  = y_top + 0.11 * y_top,
+    y_cap  = y_bar - 0.03 * y_top
+  )
+
+# only draw brackets where both groups exist
+ttests_draw <- ttests %>% filter(n_yes > 0 & n_no > 0)
+
+p <- p +
+  geom_segment(data = ttests_draw,
+               aes(x = 1, xend = 2, y = y_bar, yend = y_bar),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_segment(data = ttests_draw,
+               aes(x = 1, xend = 1, y = y_bar, yend = y_cap),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_segment(data = ttests_draw,
+               aes(x = 2, xend = 2, y = y_bar, yend = y_cap),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_text(data = ttests_draw,
+            aes(x = 1.5, y = y_bar + 0.04*y_top, label = label),
+            inherit.aes = FALSE, size = 3.3)
+
+p
+```
+
+Let us test for bimodality
+
+```{r vitiligo_test_bimodality}
+# --- helpers ---
+bc_stats <- function(x) {
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if (n < 4) return(c(bc = NA_real_, skew = NA_real_, beta2 = NA_real_))
+  m  <- mean(x)
+  c2 <- mean((x - m)^2)
+  c3 <- mean((x - m)^3)
+  c4 <- mean((x - m)^4)
+  skew  <- if (c2 > 0) c3 / (c2^(3/2)) else NA_real_
+  beta2 <- if (c2 > 0) c4 / (c2^2) else NA_real_  # Pearson kurtosis (not "excess")
+  bc    <- (skew^2 + 1) / beta2                   # Sarle's bimodality coefficient
+  c(bc = bc, skew = skew, beta2 = beta2)
+}
+
+kde_modes <- function(x, bw = "SJ") {
+  x <- x[is.finite(x)]
+  if (length(x) < 5) return(NA_integer_)
+  b <- if (bw == "SJ") bw.SJ(x) else if (bw == "nrd0") bw.nrd0(x) else bw
+  d <- density(x, bw = b)
+  peaks <- which(diff(sign(diff(d$y))) < 0)  # local maxima
+  length(peaks)
+}
+
+# --- compute metrics per panel (BL/QT x Yes/No) ---
+bimod_tbl <- anal_df %>%
+  group_by(survey_type, q1_newspots) %>%
+  summarise(
+    n        = sum(is.finite(stress_score)),
+    # Dip test (unimodality)
+    dip_stat = { tmp <- dip.test(stress_score); unname(tmp$statistic) },
+    dip_p    = { tmp <- dip.test(stress_score); tmp$p.value },
+    # Silverman test (bootstrap KDE); skip for tiny n to keep it fast/stable
+    silver_p = if (n >= 20) {
+      tryCatch(
+        as.numeric(modetest(stress_score, method = "SI", B = 999, k = 1)$p.value),
+        error = function(e) NA_real_
+      )
+    } else NA_real_,
+    # Bimodality coefficient
+    bc       = { s <- bc_stats(stress_score); s[["bc"]] },
+    # KDE peak count
+    kde_modes = kde_modes(stress_score, "SJ"),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # simple flag: any one of the signals trips
+    possible_bimodal = (bc > 5/9) | (!is.na(dip_p) & dip_p < 0.05) | (!is.na(silver_p) & silver_p < 0.05)
+  )
+
+bimod_tbl
+```
+
+Finally, let us see how many BL are also indicating new spots on QT
+
+```{r bl_qt_yes_counts_and_paired_plots_v2, message=FALSE, warning=FALSE}
+
+
+# ---- helpers ----
+first_non_na <- function(x) x[which(!is.na(x))[1]]
+
+# ---- per-participant flags for Q1 (using anal_df) ----
+flags <- anal_df %>%
+  mutate(q1_newspots = as.character(q1_newspots)) %>%
+  group_by(patient_id) %>%
+  summarise(
+    bl_ans     = first_non_na(q1_newspots[survey_type == "BL"]),
+    qt_any     = any(survey_type == "QT"),
+    qt_yes     = any(survey_type == "QT" & q1_newspots == "Yes"),
+    qt_no_only = qt_any & !qt_yes,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    bl_ans = factor(bl_ans, levels = c("No","Yes")),
+    cohort = case_when(
+      bl_ans == "Yes" & qt_yes     ~ "BL Yes & QT Yes",         # A (new control)
+      bl_ans == "Yes" & qt_no_only ~ "BL Yes & QT never Yes",   # B
+      bl_ans == "No"  & qt_yes     ~ "BL No & QT Yes",          # C
+      bl_ans == "No"  & qt_no_only ~ "BL No & QT never Yes",    # D
+      bl_ans == "Yes" & !qt_any    ~ "BL Yes & No QT",
+      bl_ans == "No"  & !qt_any    ~ "BL No & No QT",
+      TRUE                         ~ "Incomplete"
+    )
+  )
+
+# Headline counts (peek to confirm your "42")
+counts <- flags %>% count(cohort, name = "n") %>% arrange(desc(n))
+counts
+
+# ---- BL/QT stress summaries ----
+bl_stress <- anal_df %>%
+  filter(survey_type == "BL") %>%
+  group_by(patient_id) %>%
+  summarise(bl_stress = median(stress_score, na.rm = TRUE), .groups = "drop")
+
+qt_no_stress <- anal_df %>%
+  filter(survey_type == "QT", q1_newspots == "No") %>%
+  group_by(patient_id) %>%
+  summarise(qt_no_med = median(stress_score, na.rm = TRUE), .groups = "drop")
+
+qt_first_yes <- anal_df %>%
+  filter(survey_type == "QT", q1_newspots == "Yes") %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(qt_yes_first = first(stress_score), .groups = "drop")
+
+dat <- flags %>%
+  left_join(bl_stress,    by = "patient_id") %>%
+  left_join(qt_no_stress, by = "patient_id") %>%
+  left_join(qt_first_yes, by = "patient_id")
+
+# ---- build FOUR cohorts ----
+cohort_A <- dat %>%                       # BL Yes & QT Yes
+  filter(cohort == "BL Yes & QT Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=Yes)", s1 = bl_stress,
+            phase2 = "QT (first Yes)", s2 = qt_yes_first)
+
+cohort_B <- dat %>%                       # BL Yes & QT never Yes
+  filter(cohort == "BL Yes & QT never Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=Yes)", s1 = bl_stress,
+            phase2 = "QT (all No)",  s2 = qt_no_med)
+
+cohort_C <- dat %>%                       # BL No & QT Yes
+  filter(cohort == "BL No & QT Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=No)",  s1 = bl_stress,
+            phase2 = "QT (first Yes)", s2 = qt_yes_first)
+
+cohort_D <- dat %>%                       # BL No & QT never Yes
+  filter(cohort == "BL No & QT never Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=No)", s1 = bl_stress,
+            phase2 = "QT (all No)", s2 = qt_no_med)
+
+paired_long <- bind_rows(cohort_A, cohort_B, cohort_C, cohort_D) %>%
+  pivot_longer(c(s1, s2), names_to = "slot", values_to = "stress") %>%
+  mutate(
+    phase  = ifelse(slot == "s1", phase1, phase2),
+    phase  = factor(phase, levels = c("BL (Q1=Yes)", "BL (Q1=No)", "QT (all No)", "QT (first Yes)")),
+    cohort = factor(cohort, levels = c("BL Yes & QT Yes",
+                                       "BL Yes & QT never Yes",
+                                       "BL No & QT Yes",
+                                       "BL No & QT never Yes"))
+  ) %>%
+  select(patient_id, cohort, phase, stress) %>%
+  filter(is.finite(stress))
+
+# ---- Ns and p-values per facet ----
+n_phase <- paired_long %>% count(cohort, phase, name = "n")
+
+# paired t + Wilcoxon
+get_paired_tests <- function(df) {
+  wide <- df %>% pivot_wider(names_from = phase, values_from = stress)
+  cols <- setdiff(names(wide), "patient_id")
+  if (length(cols) != 2) return(tibble(t_p = NA_real_, w_p = NA_real_))
+  x <- wide[[cols[1]]]; y <- wide[[cols[2]]]  # BL first (by factor order), QT second
+  tt <- try(stats::t.test(y, x, paired = TRUE), silent = TRUE)
+  wx <- try(stats::wilcox.test(y, x, paired = TRUE, exact = FALSE), silent = TRUE)
+  tibble(
+    t_p = if (inherits(tt,"try-error")) NA_real_ else tt$p.value,
+    w_p = if (inherits(wx,"try-error")) NA_real_ else wx$p.value
+  )
+}
+tests <- paired_long %>%
+  group_by(cohort) %>%
+  group_modify(~ get_paired_tests(.x)) %>%
+  ungroup() %>%
+  mutate(
+    t_lab = case_when(is.na(t_p) ~ "t: p = NA", t_p < 1e-4 ~ "t: p < 1e-4", TRUE ~ sprintf("t: p = %.3f", t_p)),
+    w_lab = case_when(is.na(w_p) ~ "W: p = NA", w_p < 1e-4 ~ "W: p < 1e-4", TRUE ~ sprintf("W: p = %.3f", w_p))
+  )
+
+# ---- plot (BL left, QT right; tan=Yes, gray=No) ----
+cut_low_med  <- 13
+cut_med_high <- 26
+
+y_top <- paired_long %>% group_by(cohort) %>%
+  summarise(y = max(stress, na.rm = TRUE), .groups = "drop")
+
+p <- ggplot(paired_long, aes(x = phase, y = stress, fill = phase)) +
+  geom_hline(yintercept = c(cut_low_med, cut_med_high), linetype = "dashed",
+             linewidth = 0.5, color = "gray30") +
+  geom_line(aes(group = patient_id), color = "grey70", alpha = 0.5, linewidth = 0.4,
+            position = position_jitter(width = 0.02, height = 0)) +
+  geom_violin(trim = FALSE, alpha = 0.6, width = 0.9, color = "grey35") +
+  geom_boxplot(width = 0.14, outlier.shape = NA, color = "black", linewidth = 0.5) +
+  geom_jitter(width = 0.05, height = 0, size = 1.4, alpha = 0.55, color = "grey10") +
+  scale_fill_manual(values = c("BL (Q1=Yes)" = "tan",
+                               "QT (first Yes)" = "tan",
+                               "BL (Q1=No)" = "gray60",
+                               "QT (all No)"  = "gray60")) +
+  facet_wrap(~ cohort, scales = "free_x", nrow = 1) +
+  labs(
+    title = "Paired stress comparisons by cohort",
+    subtitle = "Cohorts include BL Yes & QT Yes as control",
+    x = NULL, y = "Stress score"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 15, hjust = 1),
+        plot.margin = margin(t = 10, r = 28, b = 10, l = 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.20))) +
+  coord_cartesian(clip = "off")
+
+# aligned n labels
+p <- p + geom_text(data = n_phase %>% left_join(y_top, by = "cohort"),
+                   aes(x = phase, y = y + 0.05*y, label = paste0("n = ", n)),
+                   inherit.aes = FALSE, size = 3.1)
+
+# p-values centered per facet
+p <- p + geom_text(data = tests %>% left_join(y_top, by = "cohort"),
+                   aes(x = 1.5, y = y + 0.12*y, label = paste(t_lab, "|", w_lab)),
+                   inherit.aes = FALSE, size = 3.1)
+
+p
 ```
