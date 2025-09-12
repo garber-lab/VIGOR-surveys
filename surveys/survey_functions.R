@@ -105,7 +105,7 @@ process_compensation <- function(patients_df, pts_to_tix = 100) {
 #'   - `studyendreason`
 #'
 #' @param current_tz A string specifying the timezone for datetime conversion.
-#'    Defaults to the system timezone returned by `Sys.timezone()`.
+#'    Defaults to `"America/New_York"`.
 #'   
 #' @param pts_to_tix Integer specifying how many points equal one ticket for 
 #'    compensation processing. Defaults to 100. 
@@ -145,7 +145,8 @@ process_compensation <- function(patients_df, pts_to_tix = 100) {
 #'
 #' @export
 clean_patients_data <- function(patients_raw,
-                                current_tz = Sys.timezone(),
+                                # current_tz = Sys.timezone(),
+                                current_tz = "America/New_York",
                                 pts_to_tix = 100) {
   
   patients_cleaned <- patients_raw %>%
@@ -203,7 +204,6 @@ clean_patients_data <- function(patients_raw,
         num_affected == 0 ~ "zeroplex"
       )
     ) %>%
-    # TODO: create and insert a function to handle raffle points + tickets
     # process compensation data
     process_compensation(pts_to_tix = pts_to_tix) %>%
     select(
