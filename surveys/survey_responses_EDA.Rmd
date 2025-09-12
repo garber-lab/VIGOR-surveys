@@ -336,6 +336,7 @@ get_topic <- function(topic) {
            enroll_date, 
            # days_since_enrollment,
            # survey_wave, survey_period, 
+           surveyversion,
            survey_type,
            question_readable,
            answer_clean)
