@@ -55,7 +55,7 @@ process_compensation <- function(patients_df, pts_to_tix = 100) {
     mutate(
       # set all NA/empty ticket values to 0
       compensation_tickets = case_match(compensation_tickets,
-                                        c(NA, 0, "0", NULL) ~ 0L,   # 0L ensures integer instead of numeric
+                                        c(NA, 0, NULL) ~ 0L,   # 0L ensures integer instead of numeric
                                         .default = compensation_tickets),
       
       # convert points to tickets when points > 99 but user doesn't have any tix
