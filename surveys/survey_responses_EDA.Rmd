@@ -131,7 +131,7 @@ data_dictionary <- readxl::read_excel("vigor_surveys_data_dictionary_11SEPT2025.
 
 
 # clean and rename the columns in data dictionary for easier joining
-data_dict_clean_new <- data_dictionary %>%
+data_dict_clean <- data_dictionary %>%
   rename(
     question_readable = questiontext,
     answer_format = answerformat,
@@ -144,20 +144,20 @@ data_dict_clean_new <- data_dictionary %>%
          possible_answers)
 
 # display survey topic and version summary
-survey_summary_new <- data_dict_clean_new %>%
+survey_summary <- data_dict_clean %>%
   group_by(survey_topic, survey_type, surveyversion) %>%
   summarize(total_questions = n(),
             .groups = "drop") %>%
   arrange(survey_topic, survey_type, desc(as.integer(surveyversion)))
 
-kable(survey_summary_new,
+kable(survey_summary,
       format = "simple",
       caption = "Survey Topics Overview by Type and Version",
       col.names = c("Survey Topic", "Type", "Version", "# Questions"))
 
 
 # also show high-level summary w/o versions
-survey_summary_no_version <- data_dict_clean_new %>%
+survey_summary_no_version <- data_dict_clean %>%
   group_by(survey_topic, survey_type) %>%
   summarize(
     total_questions = n(),
@@ -184,7 +184,7 @@ kable(survey_summary_no_version,
 surveys_enriched_no_stress <- surveys_clean %>%
   # filter out stress surveys
   filter(str_detect(surveydisplayname, "(S|s)tress", negate = T)) %>%
-  left_join(data_dict_clean_new,
+  left_join(data_dict_clean,
             by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
   # clean answers field (remove quotes and parse JSON-like strings)
   mutate(
@@ -229,7 +229,7 @@ reverse_qs <- c(4, 5, 7, 8)
 # filter for stress surveys
 surveys_enriched_stress <- surveys_clean %>%
   filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
-  left_join(data_dict_clean_new %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
+  left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
             by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
   # arrange by patient ID, recorded dttm, and question
   arrange(patient_id, recorded_dttm, question_readable) %>%
