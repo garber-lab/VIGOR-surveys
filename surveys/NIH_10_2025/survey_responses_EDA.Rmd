@@ -210,7 +210,11 @@ reverse_qs <- c(4, 5, 7, 8)
 surveys_enriched_stress <- surveys_clean %>%
   filter(str_detect(surveydisplayname, "(S|s)tress")) %>%
   left_join(data_dict_clean %>% filter(survey_type == "QT", str_detect(surveyname, "(S|s)tress")),
-            by = c("surveyname", "stepidentifier", "resultidentifier")) %>%
+            by = c("surveyname", "surveyversion", "stepidentifier", "resultidentifier")) %>%
+  # arrange by patient ID, recorded dttm, and question
+  arrange(patient_id, recorded_dttm, question_readable) %>%
+  # remove any duplicate records from the same patient on the same day 
+  distinct(patient_id, recorded_date, question_readable, .keep_all = T) %>%
   # update survey type
   mutate(
     months_since_enroll = time_length(as_date(recorded_dttm) - as_date(enroll_date), unit = "month"),
@@ -267,7 +271,10 @@ surveys_enriched_stress <- surveys_clean %>%
     enroll_date,
     # days_since_enrollment, 
     # survey_wave_exp, survey_period,
-    survey_topic, survey_display_name, survey_type,
+    survey_topic, 
+    survey_display_name=surveydisplayname, 
+    surveyversion,
+    survey_type,
     # step_readable, 
     question_readable,
     answer_clean, 
@@ -438,45 +445,116 @@ ggplot(dates_per_q,
 
 Now that we have a sense of what the data is, let us try to figure out whether we got many new spots since we began
 
-```{r plotting_vitiligo2}
-vitiligo_df %>%
-  filter(question_readable == "Have your existing spots changed in the last 3 months (shrinking or growing)?") %>%
-  count(survey_type, answer_clean) %>%
-  ggplot(aes(x = answer_clean, y = n, fill = survey_type)) +
-  geom_col(position = "dodge", color = "black") +
-  scale_fill_manual(values = c("BL" = "black", "QT" = "gray60")) +
-  labs(x = "Answer", y = "Count") +
-  theme_minimal(base_size = 14) +
-  theme(
-    legend.position = "top",
-    axis.text.x = element_text(angle = 30, hjust = 1)
+```{r q7_with_AH_and_treating_fixed, message=FALSE, warning=FALSE}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+
+q7_txt <- "Have your existing spots changed in the last 3 months (shrinking or growing)?"
+q6_txt <- "Are you currently treating your vitiligo?"
+
+# -- helpers
+norm_stype <- function(x) {
+  x <- toupper(str_squish(as.character(x)))
+  recode(x,
+    "BASELINE"="BL", "BL "="BL",
+    "QUARTERLY"="QT", "QUARTERLY CHECK-IN"="QT", "QTR"="QT",
+    "AD-HOC"="AH", "AD HOC"="AH", "ADHOC"="AH",
+    .default = x
+  )
+}
+norm_yesno <- function(x) {
+  s <- str_to_lower(str_squish(as.character(x)))
+  case_when(
+    str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
+    str_detect(s, "^(no|n|false|0)$") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+# -- standardize once
+v <- vitiligo_df %>%
+  mutate(
+    survey_type   = norm_stype(survey_type),
+    recorded_date = as.Date(recorded_date)
   )
 
-mode_chr <- function(x) names(which.max(table(x)))
+# -- Q7 rows
+q7 <- v %>%
+  filter(question_readable == q7_txt) %>%
+  transmute(
+    patient_id, recorded_date, survey_type,
+    answer = case_when(
+      str_detect(str_to_lower(answer_clean), "no[_ ]?change|same|unchang") ~ "no change",
+      str_detect(str_to_lower(answer_clean), "shrink")                     ~ "shrinking",
+      str_detect(str_to_lower(answer_clean), "grow")                       ~ "growing",
+      TRUE ~ answer_clean
+    )
+  )
 
-treating_status <- vitiligo_df %>%
-  filter(question_readable == "Are you currently treating your vitiligo?") %>%
-  transmute(patient_id, survey_type,
-            treating = case_when(
-              str_to_lower(answer_clean) == "yes" ~ "Yes",
-              str_to_lower(answer_clean) == "no"  ~ "No",
-              TRUE ~ NA_character_
-            )) %>%
-  filter(!is.na(treating)) %>%
-  group_by(patient_id, survey_type) %>%
-  summarise(treating = mode_chr(treating), .groups = "drop")   # 1 row per person×survey
+# -- Treating rows (same-day signal)
+treat <- v %>%
+  filter(question_readable == q6_txt) %>%
+  transmute(patient_id, recorded_date, treating_same = norm_yesno(answer_clean)) %>%
+  distinct(patient_id, recorded_date, .keep_all = TRUE)
 
-arrange(recorded_at, .by_group = TRUE) %>% slice_tail(n = 1)
+# 1) same-day join first
+q7_same <- q7 %>% left_join(treat, by = c("patient_id","recorded_date"))
 
-plot_df <- vitiligo_df %>%
-  filter(question_readable == "Have your existing spots changed in the last 3 months (shrinking or growing)?") %>%
-  transmute(patient_id, survey_type,
-            answer = recode(answer_clean,
-                            "no_change" = "No change")) %>%      # normalize label
-  left_join(treating_status, by = c("patient_id","survey_type")) %>%
-  # keep all rows; mark missing treating as "Unknown" (optional)
-  mutate(treating = tidyr::replace_na(treating, "Unknown")) %>%
-  count(survey_type, answer, treating)
+# 2) build a timeline and carry forward last known treating within a window
+max_gap_days <- 120L  # adjust as you like; 0 = disable carry; Inf = always carry
+
+timeline <- bind_rows(
+  q7_same %>% mutate(source = "q7",    source_ord = 1L),
+  treat   %>% mutate(survey_type = NA_character_, answer = NA_character_,
+                     source = "treat", source_ord = 0L)
+) %>%
+  arrange(patient_id, recorded_date, source_ord) %>%
+  group_by(patient_id) %>%
+  mutate(
+    # real columns to fill down
+    treating_ffill = treating_same,                               # start as same-day; will fill
+    treat_date     = if_else(source == "treat", recorded_date, NA_Date_)
+  ) %>%
+  tidyr::fill(treating_ffill, treat_date, .direction = "down") %>%
+  ungroup()
+
+# 3) keep only Q7 rows and finalize treating with window logic
+q7_aug <- timeline %>%
+  filter(source == "q7") %>%
+  mutate(
+    days_since_last_treat = as.integer(recorded_date - treat_date),
+    treating_final = case_when(
+      !is.na(treating_same) ~ treating_same,  # exact same-day answer
+      !is.na(treating_ffill) & (is.infinite(max_gap_days) | days_since_last_treat <= max_gap_days) ~ treating_ffill,
+      TRUE ~ NA_character_
+    ),
+    treating_final = fct_relevel(fct_explicit_na(treating_final, "Unknown"), "Yes", "No", "Unknown"),
+    treating_source = case_when(
+      !is.na(treating_same) ~ "same-day",
+      !is.na(treating_ffill) & (is.infinite(max_gap_days) | days_since_last_treat <= max_gap_days) ~ "carried",
+      TRUE ~ "unknown"
+    )
+  )
+
+# ---- Plot A: counts by survey_type (BL/QT/AH)
+v %>%
+  filter(question_readable == q7_txt) %>%
+  count(survey_type, answer_clean) %>%
+  ggplot(aes(x = answer_clean, y = n, fill = survey_type)) +
+  geom_col(position = position_dodge(width = 0.9), color = "black") +
+  scale_fill_manual(values = c("BL" = "black", "QT" = "gray60", "AH" = "gray20"),
+                    na.translate = FALSE) +
+  labs(x = "Answer", y = "Count", fill = "Survey type") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+# ---- Plot B: facet by survey_type, split by Treating?
+plot_df <- q7_aug %>%
+  count(survey_type, answer, treating = treating_final)
 
 ggplot(plot_df, aes(x = answer, y = n, fill = treating)) +
   geom_col(color = "black", width = 0.8) +
@@ -486,14 +564,31 @@ ggplot(plot_df, aes(x = answer, y = n, fill = treating)) +
   theme_minimal(base_size = 14) +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 
-
+# (optional QC: see where treating labels come from)
+# q7_aug %>% count(survey_type, treating_source)
 ```
 
-```{r vitiligo_new_spots, R.options=}
-q1_txt  <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
-q12_txt <- "Do you have vitiligo?"
 
-norm_yesno <- function(x) {
+
+```{r vitiligo_new_spots_with_AH, message=FALSE, warning=FALSE}
+
+q1_txt_main <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
+q1_txt_ah   <- "Have you noticed any new white spots on your skin that you think can be vitiligo or improvement (repigmentation) of your vitiligo?"
+q12_txt     <- "Do you have vitiligo?"
+
+# which AH codes count as "new white spot" (edit this if you change your mind)
+ah_newspot_codes <- c(1) #1 = New white spot(s), 2= Improvement, 3 = neither
+
+norm_stype <- function(x){
+  x <- toupper(str_squish(as.character(x)))
+  dplyr::recode(x,
+    "BASELINE"="BL", "BL "="BL",
+    "QUARTERLY"="QT", "QUARTERLY CHECK-IN"="QT", "QTR"="QT",
+    "AD-HOC"="AH", "AD HOC"="AH", "ADHOC"="AH",
+    .default = x
+  )
+}
+norm_yesno <- function(x){
   s <- str_to_lower(str_squish(as.character(x)))
   dplyr::case_when(
     str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
@@ -502,25 +597,46 @@ norm_yesno <- function(x) {
   )
 }
 
-# --- 1) Baseline (BL) vitiligo status per participant from Q12 ---
-bl_status <- vitiligo_df %>%
-  filter(question_readable == q12_txt, toupper(survey_type) == "BL") %>%
+# --- normalize survey_type once ---
+v <- vitiligo_df %>% mutate(survey_type = norm_stype(survey_type))
+
+# --- 1) Baseline (BL) vitiligo status from Q12 (same as before) ---
+bl_status <- v %>%
+  filter(question_readable == q12_txt, survey_type == "BL") %>%
   transmute(patient_id, has_vitiligo_bl = norm_yesno(answer_clean)) %>%
   distinct(patient_id, .keep_all = TRUE) %>%
-  mutate(has_vitiligo_bl = fct_explicit_na(has_vitiligo_bl, "Unknown"))
+  mutate(has_vitiligo_bl = forcats::fct_explicit_na(has_vitiligo_bl, "Unknown"))
 
-# --- 2) Did they EVER report new white spots on Q1? (across BL/QT) ---
-q1_ever <- vitiligo_df %>%
-  filter(question_readable == q1_txt) %>%
-  transmute(patient_id, q1 = norm_yesno(answer_clean)) %>%
+# --- 2) Did they EVER report new white spots on Q1? (BL/QT normal Q1 + AH special Q1) ---
+q1_any <- v %>%
+  # keep the standard Q1 anywhere (BL/QT/AH) OR the AH mixed Q1
+  filter(question_readable %in% c(q1_txt_main, q1_txt_ah)) %>%
+  transmute(
+    patient_id, survey_type, question_readable, answer_clean,
+    is_yes = dplyr::case_when(
+      # standard wording (any survey type): use Yes/No parser
+      question_readable == q1_txt_main ~ (norm_yesno(answer_clean) == "Yes"),
+
+      # AH mixed wording: treat numeric code 1 as "new white spot"
+      question_readable == q1_txt_ah ~ {
+        # pull a leading integer if present; NA if nothing numeric
+        ans_num <- suppressWarnings(as.integer(stringr::str_extract(answer_clean, "^\\d+")))
+        !is.na(ans_num) & ans_num %in% ah_newspot_codes
+      },
+
+      TRUE ~ FALSE
+    )
+  )
+
+q1_ever <- q1_any %>%
   group_by(patient_id) %>%
-  summarise(ever_yes = any(q1 == "Yes", na.rm = TRUE), .groups = "drop")
+  summarise(ever_yes = any(is_yes, na.rm = TRUE), .groups = "drop")
 
 # --- 3) Join + summarise by baseline group ---
 summary_df <- bl_status %>%
   full_join(q1_ever, by = "patient_id") %>%
   mutate(
-    ever_yes = replace_na(ever_yes, FALSE),
+    ever_yes = tidyr::replace_na(ever_yes, FALSE),
     has_vitiligo_bl = fct_relevel(has_vitiligo_bl, "Yes", "No", "Unknown")
   )
 
@@ -536,18 +652,18 @@ yes_summary <- summary_df %>%
 # --- 4) Plot with explicit denominators in the labels ---
 ggplot(yes_summary, aes(x = has_vitiligo_bl, y = n_yes, fill = has_vitiligo_bl)) +
   geom_col(color = "black", width = 0.8) +
-  geom_text(aes(label = paste0(n_yes, " / ", n_total, " (", percent(pct_yes), ")")),
+  geom_text(aes(label = paste0(n_yes, " / ", n_total, " (", scales::percent(pct_yes), ")")),
             vjust = -0.35, size = 4) +
   scale_fill_manual(values = c("Yes" = "black", "No" = "gray60", "Unknown" = "white")) +
   labs(
-    title = "Participants who EVER reported new white spots (Q1), by baseline vitiligo status",
+    title = "Participants who EVER reported new white spots (Q1, incl. AH), by baseline vitiligo status",
     x = "Baseline vitiligo (from BL Q12)",
     y = "Number of participants"
   ) +
   theme_minimal(base_size = 14) +
   theme(legend.position = "none")
 
-# --- 5) Baseline counts table you asked for ---
+# --- 5) Baseline counts table ---
 bl_counts <- yes_summary %>%
   select(has_vitiligo_bl, n_total) %>%
   arrange(has_vitiligo_bl)
@@ -555,138 +671,197 @@ bl_counts
 ```
 
 
-```{r violins_bl_vs_qt_ttests_counts, message=FALSE, warning=FALSE}
 
-q1_txt  <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
-q12_txt <- "Do you have vitiligo?"
+```{r violins_bl_qt_ah_ttests_counts, message=FALSE, warning=FALSE}
+# ---- setup ---------------------------------------------------------------
+library(dplyr); library(tidyr); library(stringr); library(forcats); library(ggplot2)
 
-norm_yesno <- function(x) {
+q1_txt_main <- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
+q1_txt_ah   <- "Have you noticed any new white spots on your skin that you think can be vitiligo or improvement (repigmentation) of your vitiligo?"
+q12_txt     <- "Do you have vitiligo?"
+ah_newspot_codes <- c(1)  # edit if needed
+
+norm_yesno <- function(x){
   s <- str_to_lower(str_squish(as.character(x)))
-  dplyr::case_when(
+  case_when(
     str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
     str_detect(s, "^(no|n|false|0)$") ~ "No",
     TRUE ~ NA_character_
   )
 }
-
-# Q12 Yes on the same date
-q12_yes_by_date <- vitiligo_df %>%
-  filter(question_readable == q12_txt) %>%
-  transmute(patient_id, recorded_date, has_vitiligo = norm_yesno(answer_clean)) %>%
-  filter(has_vitiligo == "Yes") %>%
-  distinct(patient_id, recorded_date)
-
-# Q1 (new white spots) reduced to Yes/No per patient-date
-q1_by_date <- vitiligo_df %>%
-  filter(question_readable == q1_txt) %>%
-  transmute(patient_id, recorded_date, q1_newspots = norm_yesno(answer_clean)) %>%
-  filter(!is.na(q1_newspots)) %>%
-  group_by(patient_id, recorded_date) %>%
-  summarise(q1_newspots = ifelse(any(q1_newspots == "Yes"), "Yes", "No"),
-            .groups = "drop")
-
-# Stress on same date + tidy survey_type
-stress_on_date <- stress_df %>%
-  transmute(patient_id, recorded_date,
-            survey_type = recode(str_to_upper(str_squish(survey_type)),
-                                 "BASELINE"="BL", "QUARTERLY"="QT",
-                                 "QUARTERLY CHECK-IN"="QT", "QTR"="QT",
-                                 .default = str_to_upper(survey_type)),
-            stress_score)
-
-# Build analysis df: same-day Q12==Yes, Q1 answer present, stress present
-anal_df <- q1_by_date %>%
-  inner_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
-  inner_join(stress_on_date,  by = c("patient_id","recorded_date")) %>%
-  mutate(q1_newspots = factor(q1_newspots, levels = c("No","Yes")))
-
-# ---- main plot (your colors, stronger box outline so median pops) ----
-p <- ggplot(anal_df, aes(x = q1_newspots, y = stress_score, fill = q1_newspots)) +
-  geom_violin(trim = FALSE, alpha = 0.7, width = 0.9) +
-  geom_boxplot(width = 0.14, outlier.shape = NA, color = "black", linewidth = 0.5) +
-  scale_fill_manual(values = c("No" = "gray60", "Yes" = "tan")) +
-  facet_wrap(~ survey_type, nrow = 1) +
-  scale_x_discrete(drop = FALSE) +
-  labs(
-    title = "Stress vs. ‘new white spots?’ by survey type (same day, Q12 = Yes)",
-    x = "Answered ‘new white spots?’", y = "Stress score"
-  ) +
-  geom_hline(yintercept = 13, linetype = "dashed", color = "red") +
-  geom_hline(yintercept = 26, linetype = "dashed", color = "blue") +
-  theme_minimal(base_size = 13) +
-  theme(legend.position = "none", panel.grid.minor = element_blank()) +
-  # add headroom for annotations
-  scale_y_continuous(expand = expansion(mult = c(0.02, 0.18)))
-
-# ---- add n per group per panel ----
-counts <- anal_df %>%
-  count(survey_type, q1_newspots, name = "n") %>%
-  tidyr::complete(survey_type, q1_newspots, fill = list(n = 0)) %>%
-  mutate(x = as.numeric(factor(q1_newspots, levels = c("No","Yes"))))
-
-ymax <- anal_df %>%
-  group_by(survey_type) %>%
-  summarise(y_top = max(stress_score, na.rm = TRUE), .groups = "drop")
-
-ann_n <- counts %>%
-  left_join(ymax, by = "survey_type") %>%
-  mutate(y = y_top + 0.05 * y_top)
-
-p <- p + geom_text(data = ann_n,
-                   aes(x = x, y = y, label = paste0("n = ", n)),
-                   inherit.aes = FALSE, size = 3.3)
-
-# ---- Welch t-tests per panel + bracketed p-values ----
-# replace your format_p with a vectorized version
-format_p <- function(p) {
-  dplyr::case_when(
-    is.na(p)        ~ "p = NA",
-    p < 1e-4        ~ "p < 1e-4",
-    TRUE            ~ sprintf("p = %.3f", p)
+norm_stype <- function(x){
+  x <- str_to_upper(str_squish(as.character(x)))
+  recode(x,
+    "BASELINE"="BL","BL "="BL",
+    "QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT","QTR"="QT",
+    "AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+    .default = x
   )
 }
 
-ttests <- anal_df %>%
-  group_by(survey_type) %>%
-  summarise(
-    n_yes = sum(q1_newspots == "Yes"),
-    n_no  = sum(q1_newspots == "No"),
-    p_val = {
-      if (n_yes > 1 && n_no > 1) {
-        out <- try(t.test(stress_score ~ q1_newspots,
-                          data = cur_data(), var.equal = FALSE), silent = TRUE)
-        if (inherits(out, "try-error")) NA_real_ else out$p.value
-      } else NA_real_
-    },
-    y_top = max(stress_score, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
+v <- vitiligo_df %>%
+  mutate(survey_type = norm_stype(survey_type),
+         recorded_date = as.Date(recorded_date))
+
+# Q12 gates
+q12_yes_by_date <- v %>%
+  filter(question_readable == q12_txt) %>%
+  transmute(patient_id, recorded_date, has_vitiligo = norm_yesno(answer_clean)) %>%
+  filter(has_vitiligo == "Yes") %>%
+  distinct(patient_id, recorded_date, .keep_all = TRUE)
+
+bl_q12_yes <- v %>%
+  filter(question_readable == q12_txt, survey_type == "BL") %>%
+  transmute(patient_id, bl_vit_yes = norm_yesno(answer_clean) == "Yes") %>%
+  distinct(patient_id, bl_vit_yes)
+
+# Q1 per patient-date (standard + AH code 1)
+q1_by_date <- v %>%
+  filter(question_readable %in% c(q1_txt_main, q1_txt_ah)) %>%
+  transmute(patient_id, recorded_date, survey_type, question_readable, answer_clean,
+            q1_flag = case_when(
+              question_readable == q1_txt_main ~ (norm_yesno(answer_clean) == "Yes"),
+              question_readable == q1_txt_ah   ~ {
+                ans_num <- suppressWarnings(as.integer(str_extract(answer_clean, "^\\d+")))
+                !is.na(ans_num) & ans_num %in% ah_newspot_codes
+              },
+              TRUE ~ FALSE
+            )) %>%
+  group_by(patient_id, recorded_date, survey_type) %>%
+  summarise(q1_newspots = ifelse(any(q1_flag, na.rm = TRUE), "Yes", "No"), .groups = "drop")
+
+# stress per day
+stress_on_date <- stress_df %>%
+  transmute(patient_id, recorded_date,
+            survey_type = recode(str_to_upper(str_squish(survey_type)),
+                                 "BASELINE"="BL","QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT",
+                                 "QTR"="QT","AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+                                 .default = str_to_upper(survey_type)),
+            stress_score)
+
+# ---- PANEL 1: Baseline ---------------------------------------------------
+bl_panel <- q1_by_date %>%
+  filter(survey_type == "BL") %>%
+  inner_join(stress_on_date %>% filter(survey_type == "BL"),
+             by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes) %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_tail(n = 1) %>%  # just in case of duplicates
+  ungroup() %>%
+  transmute(panel = "Baseline",
+            group = if_else(q1_newspots=="Yes","New spots at BL","No new spots at BL"),
+            flag  = if_else(q1_newspots=="Yes","Yes","No"),
+            stress = stress_score)
+
+# ---- PANEL 2: Follow-up (QT/AH) -----------------------------------------
+# A) first QT/AH "Yes" with same-day stress
+qtah_yes <- q1_by_date %>%
+  filter(survey_type %in% c("QT","AH"), q1_newspots == "Yes") %>%
+  inner_join(stress_on_date, by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes) %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  transmute(patient_id, stress_yes = stress_score)
+
+# B) participants who NEVER said Yes on QT/AH (use median of their QT/AH "No" stresses)
+never_ids <- q1_by_date %>%
+  filter(survey_type %in% c("QT","AH")) %>%
+  group_by(patient_id) %>%
+  summarise(has_yes = any(q1_newspots=="Yes"), .groups = "drop") %>%
+  filter(!has_yes) %>%
+  pull(patient_id)
+
+qtah_no <- q1_by_date %>%
+  filter(survey_type %in% c("QT","AH"),
+         patient_id %in% never_ids,
+         q1_newspots == "No") %>%
+  inner_join(stress_on_date, by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes) %>%
+  group_by(patient_id) %>%
+  summarise(stress_no_med = median(stress_score, na.rm = TRUE), .groups = "drop")
+
+follow_panel <- bind_rows(
+  qtah_yes %>% transmute(panel = "Follow-up (QT/AH)",
+                         group = "Yes on QT/AH (same day)", flag = "Yes", stress = stress_yes),
+  qtah_no  %>% transmute(panel = "Follow-up (QT/AH)",
+                         group = "Never Yes on QT/AH",      flag = "No",  stress = stress_no_med)
+)
+
+# ---- combine + plot ------------------------------------------------------
+plot_df <- bind_rows(bl_panel, follow_panel) %>%
   mutate(
-    label  = paste0("Welch t-test, ", format_p(p_val)),
-    y_bar  = y_top + 0.11 * y_top,
-    y_cap  = y_bar - 0.03 * y_top
+    panel = factor(panel, levels = c("Baseline","Follow-up (QT/AH)")),
+    flag  = factor(flag,  levels = c("No","Yes")),
+    group = factor(group,
+                   levels = c("No new spots at BL","New spots at BL",
+                              "Never Yes on QT/AH","Yes on QT/AH (same day)"))
   )
 
-# only draw brackets where both groups exist
-ttests_draw <- ttests %>% filter(n_yes > 0 & n_no > 0)
+# p-values per panel (Welch; independent groups)
+fmt_p <- function(p) dplyr::case_when(is.na(p) ~ "p = NA", p < 1e-4 ~ "p < 1e-4", TRUE ~ sprintf("p = %.3f", p))
+tt <- plot_df %>%
+  group_by(panel) %>%
+  summarise(
+    n_yes = sum(flag=="Yes"), n_no = sum(flag=="No"),
+    p = { if(n_yes>1 && n_no>1){
+            out <- try(t.test(stress ~ flag, data = cur_data(), var.equal = FALSE), silent=TRUE)
+            if (inherits(out,"try-error")) NA_real_ else out$p.value
+          } else NA_real_ },
+    y_top = max(stress, na.rm=TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(lbl = paste0("Welch t-test, ", fmt_p(p)),
+         y_bar = y_top + 0.11*y_top,
+         y_cap = y_bar - 0.03*y_top)
 
-p <- p +
-  geom_segment(data = ttests_draw,
-               aes(x = 1, xend = 2, y = y_bar, yend = y_bar),
-               inherit.aes = FALSE, linewidth = 0.4) +
-  geom_segment(data = ttests_draw,
-               aes(x = 1, xend = 1, y = y_bar, yend = y_cap),
-               inherit.aes = FALSE, linewidth = 0.4) +
-  geom_segment(data = ttests_draw,
-               aes(x = 2, xend = 2, y = y_bar, yend = y_cap),
-               inherit.aes = FALSE, linewidth = 0.4) +
-  geom_text(data = ttests_draw,
-            aes(x = 1.5, y = y_bar + 0.04*y_top, label = label),
-            inherit.aes = FALSE, size = 3.3)
+# counts for labels
+nn <- plot_df %>%
+  count(panel, group, name = "n") %>%
+  left_join(plot_df %>% group_by(panel) %>% summarise(y_top = max(stress, na.rm=TRUE)), by = "panel") %>%
+  mutate(y = y_top + 0.05*y_top)
 
-p
+# plot
+ggplot(plot_df, aes(x = group, y = stress, fill = flag)) +
+  geom_violin(trim = FALSE, alpha = 0.7, width = 0.9) +
+  geom_boxplot(width = 0.14, outlier.shape = NA, color = "black", linewidth = 0.5) +
+  scale_fill_manual(values = c("No" = "gray60", "Yes" = "tan"), guide = "none") +
+  facet_wrap(~ panel, scales = "free_x", nrow = 1) +
+  geom_hline(yintercept = 13, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 26, linetype = "dashed", color = "blue") +
+  labs(
+    title = "Stress vs ‘new white spots?’ at Baseline and Follow-up",
+    subtitle = "Follow-up: first QT/AH ‘Yes’ (same day) vs participants who never said ‘Yes’ on QT/AH",
+    x = NULL, y = "Stress score"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 12, hjust = 1),
+        panel.grid.minor = element_blank()) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.20))) +
+  # n labels
+  geom_text(data = nn, aes(x = group, y = y, label = paste0("n = ", n)),
+            inherit.aes = FALSE, size = 3.2) +
+  # bracket + p-value per panel
+  geom_segment(data = tt, aes(x = 1, xend = 2, y = y_bar, yend = y_bar),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_segment(data = tt, aes(x = 1, xend = 1, y = y_bar, yend = y_cap),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_segment(data = tt, aes(x = 2, xend = 2, y = y_bar, yend = y_cap),
+               inherit.aes = FALSE, linewidth = 0.4) +
+  geom_text(data = tt, aes(x = 1.5, y = y_bar + 0.04*y_top, label = lbl),
+            inherit.aes = FALSE, size = 3.2)
+
+
+
 ```
-
 Let us test for bimodality
 
 ```{r vitiligo_test_bimodality}
@@ -909,4 +1084,423 @@ p <- p + geom_text(data = tests %>% left_join(y_top, by = "cohort"),
                    inherit.aes = FALSE, size = 3.1)
 
 p
+```
+```{r bl_qt_yes_counts_and_paired_plots_v3, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+
+# ------------------------------------------------------------
+# Reuse your existing anal_df (BL/QT only) for the first 4 cohorts
+# ------------------------------------------------------------
+
+first_non_na <- function(x) x[which(!is.na(x))[1]]
+
+flags <- anal_df %>%
+  mutate(q1_newspots = as.character(q1_newspots)) %>%
+  group_by(patient_id) %>%
+  summarise(
+    bl_ans     = first_non_na(q1_newspots[survey_type == "BL"]),
+    qt_any     = any(survey_type == "QT"),
+    qt_yes     = any(survey_type == "QT" & q1_newspots == "Yes"),
+    qt_no_only = qt_any & !qt_yes,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    bl_ans = factor(bl_ans, levels = c("No","Yes")),
+    cohort = case_when(
+      bl_ans == "Yes" & qt_yes     ~ "BL Yes & QT Yes",         # A
+      bl_ans == "Yes" & qt_no_only ~ "BL Yes & QT never Yes",   # B
+      bl_ans == "No"  & qt_yes     ~ "BL No & QT Yes",          # C
+      bl_ans == "No"  & qt_no_only ~ "BL No & QT never Yes",    # D
+      bl_ans == "Yes" & !qt_any    ~ "BL Yes & No QT",
+      bl_ans == "No"  & !qt_any    ~ "BL No & No QT",
+      TRUE                         ~ "Incomplete"
+    )
+  )
+
+# (optional) peek counts
+# flags %>% count(cohort, name="n") %>% arrange(desc(n))
+
+# BL stress (median per person)
+bl_stress <- anal_df %>%
+  filter(survey_type == "BL") %>%
+  group_by(patient_id) %>%
+  summarise(bl_stress = median(stress_score, na.rm = TRUE), .groups = "drop")
+
+# QT summaries for the 4 original cohorts
+qt_no_stress <- anal_df %>%
+  filter(survey_type == "QT", q1_newspots == "No") %>%
+  group_by(patient_id) %>%
+  summarise(qt_no_med = median(stress_score, na.rm = TRUE), .groups = "drop")
+
+qt_first_yes <- anal_df %>%
+  filter(survey_type == "QT", q1_newspots == "Yes") %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(qt_yes_first = first(stress_score), .groups = "drop")
+
+dat <- flags %>%
+  left_join(bl_stress,    by = "patient_id") %>%
+  left_join(qt_no_stress, by = "patient_id") %>%
+  left_join(qt_first_yes, by = "patient_id")
+
+cohort_A <- dat %>%
+  filter(cohort == "BL Yes & QT Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=Yes)", s1 = bl_stress,
+            phase2 = "QT (first Yes)", s2 = qt_yes_first)
+
+cohort_B <- dat %>%
+  filter(cohort == "BL Yes & QT never Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=Yes)", s1 = bl_stress,
+            phase2 = "QT (all No)",  s2 = qt_no_med)
+
+cohort_C <- dat %>%
+  filter(cohort == "BL No & QT Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=No)",  s1 = bl_stress,
+            phase2 = "QT (first Yes)", s2 = qt_yes_first)
+
+cohort_D <- dat %>%
+  filter(cohort == "BL No & QT never Yes") %>%
+  transmute(patient_id, cohort,
+            phase1 = "BL (Q1=No)", s1 = bl_stress,
+            phase2 = "QT (all No)", s2 = qt_no_med)
+
+paired_long <- bind_rows(cohort_A, cohort_B, cohort_C, cohort_D) %>%
+  pivot_longer(c(s1, s2), names_to = "slot", values_to = "stress") %>%
+  mutate(
+    phase  = ifelse(slot == "s1", phase1, phase2),
+    cohort = factor(cohort, levels = c("BL Yes & QT Yes",
+                                       "BL Yes & QT never Yes",
+                                       "BL No & QT Yes",
+                                       "BL No & QT never Yes"))
+  ) %>%
+  select(patient_id, cohort, phase, stress) %>%
+  filter(is.finite(stress))
+
+# ------------------------------------------------------------
+# Add TWO new AH facets (BL vs AH code 1 and BL vs AH code 2)
+# ------------------------------------------------------------
+
+# Minimal helpers to parse types & Q12 gate for AH rows
+norm_stype <- function(x){
+  x <- stringr::str_to_upper(stringr::str_squish(as.character(x)))
+  dplyr::recode(x,
+    "BASELINE"="BL","BL "="BL",
+    "QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT","QTR"="QT",
+    "AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+    .default = x
+  )
+}
+norm_yesno <- function(x){
+  s <- stringr::str_to_lower(stringr::str_squish(as.character(x)))
+  dplyr::case_when(
+    stringr::str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
+    stringr::str_detect(s, "^(no|n|false|0)$") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+# Text for the AH mixed Q1
+q1_txt_ah <- "Have you noticed any new white spots on your skin that you think can be vitiligo or improvement (repigmentation) of your vitiligo?"
+q12_txt   <- "Do you have vitiligo?"
+ah_code_newspot <- 1
+ah_code_shrink  <- 2
+
+# normalize a local copy "v" for AH work
+v <- vitiligo_df %>%
+  mutate(
+    survey_type   = norm_stype(survey_type),
+    recorded_date = as.Date(recorded_date)
+  )
+
+# same-day Q12 Yes and BL Q12 Yes as gate
+q12_yes_by_date <- v %>%
+  filter(question_readable == q12_txt) %>%
+  transmute(patient_id, recorded_date, has_vitiligo = norm_yesno(answer_clean)) %>%
+  filter(has_vitiligo == "Yes") %>%
+  distinct(patient_id, recorded_date, .keep_all = TRUE)
+
+bl_q12_yes <- v %>%
+  filter(question_readable == q12_txt, survey_type == "BL") %>%
+  transmute(patient_id, bl_vit_yes = norm_yesno(answer_clean) == "Yes") %>%
+  distinct(patient_id, bl_vit_yes)
+
+# stress (includes AH if present)
+stress_on_date <- stress_df %>%
+  transmute(
+    patient_id, recorded_date,
+    survey_type = dplyr::recode(stringr::str_to_upper(stringr::str_squish(survey_type)),
+                                "BASELINE"="BL","QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT",
+                                "QTR"="QT","AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+                                .default = stringr::str_to_upper(survey_type)),
+    stress_score
+  )
+
+# Pull AH answers & numeric code
+ah_q1 <- v %>%
+  filter(survey_type == "AH", question_readable == q1_txt_ah) %>%
+  transmute(patient_id, recorded_date, survey_type,
+            code = suppressWarnings(as.integer(stringr::str_extract(answer_clean, "^\\d+"))))
+
+# First AH code=1 (new spot) day with same-day stress and Q12 gate
+ah1_first <- ah_q1 %>%
+  filter(code == ah_code_newspot) %>%
+  inner_join(stress_on_date %>% filter(survey_type == "AH"),
+             by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes) %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(ah_code1_first = first(stress_score), .groups = "drop")
+
+# First AH code=2 (shrinking) day with same-day stress and Q12 gate
+ah2_first <- ah_q1 %>%
+  filter(code == ah_code_shrink) %>%
+  inner_join(stress_on_date %>% filter(survey_type == "AH"),
+             by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes) %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(ah_code2_first = first(stress_score), .groups = "drop")
+
+# Join AH to BL stress; build two more cohorts
+dat_ah <- bl_stress %>%
+  left_join(ah1_first, by = "patient_id") %>%
+  left_join(ah2_first, by = "patient_id")
+
+# build extra AH cohorts (same as you had)
+cohort_E <- dat_ah %>%
+  filter(is.finite(bl_stress), is.finite(ah_code1_first)) %>%
+  transmute(patient_id, cohort = "BL → AH code 1",
+            phase1 = "BL (baseline)",            s1 = bl_stress,
+            phase2 = "AH (code 1: new spot)",    s2 = ah_code1_first)
+
+cohort_F <- dat_ah %>%
+  filter(is.finite(bl_stress), is.finite(ah_code2_first)) %>%
+  transmute(patient_id, cohort = "BL → AH code 2",
+            phase1 = "BL (baseline)",            s1 = bl_stress,
+            phase2 = "AH (code 2: shrinking)",   s2 = ah_code2_first)
+
+paired_long_extra <- bind_rows(cohort_E, cohort_F) %>%
+  tidyr::pivot_longer(c(s1, s2), names_to = "slot", values_to = "stress") %>%
+  dplyr::mutate(
+    phase = dplyr::if_else(slot == "s1", phase1, phase2, missing = NA_character_),
+    phase = as.character(phase)  # <- force character, not logical/factor
+  ) %>%
+  dplyr::select(patient_id, cohort, phase, stress) %>%
+  dplyr::filter(is.finite(stress))
+
+# also make sure the original is character before binding
+paired_long <- paired_long %>% dplyr::mutate(phase = as.character(phase))
+
+# now this will work
+paired_long <- dplyr::bind_rows(paired_long, paired_long_extra)
+
+# Factor levels so BL always on the left
+phase_levels <- c("BL (Q1=Yes)", "BL (Q1=No)", "BL (baseline)",
+                  "QT (all No)", "QT (first Yes)",
+                  "AH (code 1: new spot)", "AH (code 2: shrinking)")
+paired_long <- paired_long %>%
+  mutate(
+    phase  = factor(phase, levels = phase_levels),
+    cohort = factor(cohort, levels = c("BL Yes & QT Yes",
+                                       "BL Yes & QT never Yes",
+                                       "BL No & QT Yes",
+                                       "BL No & QT never Yes",
+                                       "BL → AH code 1",
+                                       "BL → AH code 2"))
+  )
+
+# Ns and paired tests per facet
+n_phase <- paired_long %>% count(cohort, phase, name = "n")
+
+get_paired_tests <- function(df) {
+  wide <- df %>% pivot_wider(names_from = phase, values_from = stress)
+  cols <- setdiff(names(wide), "patient_id")
+  if (length(cols) != 2) return(tibble(t_p = NA_real_, w_p = NA_real_))
+  x <- wide[[cols[1]]]; y <- wide[[cols[2]]]  # BL left, follow-up right
+  tt <- try(stats::t.test(y, x, paired = TRUE), silent = TRUE)
+  wx <- try(stats::wilcox.test(y, x, paired = TRUE, exact = FALSE), silent = TRUE)
+  tibble(
+    t_p = if (inherits(tt,"try-error")) NA_real_ else tt$p.value,
+    w_p = if (inherits(wx,"try-error")) NA_real_ else wx$p.value
+  )
+}
+tests <- paired_long %>%
+  group_by(cohort) %>%
+  group_modify(~ get_paired_tests(.x)) %>%
+  ungroup() %>%
+  mutate(
+    t_lab = case_when(is.na(t_p) ~ "t: p = NA", t_p < 1e-4 ~ "t: p < 1e-4", TRUE ~ sprintf("t: p = %.3f", t_p)),
+    w_lab = case_when(is.na(w_p) ~ "W: p = NA", w_p < 1e-4 ~ "W: p < 1e-4", TRUE ~ sprintf("W: p = %.3f", w_p))
+  )
+
+cut_low_med  <- 13
+cut_med_high <- 26
+
+y_top <- paired_long %>% group_by(cohort) %>%
+  summarise(y = max(stress, na.rm = TRUE), .groups = "drop")
+
+p <- ggplot(paired_long, aes(x = phase, y = stress, fill = phase)) +
+  geom_hline(yintercept = cut_low_med,  linetype = "dashed", linewidth = 0.5, color = "gray30") +
+  geom_hline(yintercept = cut_med_high, linetype = "dashed", linewidth = 0.5, color = "gray30") +
+  geom_line(aes(group = patient_id), color = "grey70", alpha = 0.5, linewidth = 0.4,
+            position = position_jitter(width = 0.02, height = 0)) +
+  geom_violin(trim = FALSE, alpha = 0.6, width = 0.9, color = "grey35") +
+  geom_boxplot(width = 0.14, outlier.shape = NA, color = "black", linewidth = 0.5) +
+  geom_jitter(width = 0.05, height = 0, size = 1.4, alpha = 0.55, color = "grey10") +
+  scale_fill_manual(values = c(
+    "BL (Q1=Yes)"            = "tan",
+    "QT (first Yes)"         = "tan",
+    "AH (code 1: new spot)"  = "tan",
+    "BL (Q1=No)"             = "gray60",
+    "QT (all No)"            = "gray60",
+    "BL (baseline)"          = "gray60",
+    "AH (code 2: shrinking)" = "gray60"
+  )) +
+  facet_wrap(~ cohort, scales = "free_x", nrow = 1) +
+  labs(
+    title = "Paired stress comparisons by cohort (incl. Ad-Hoc)",
+    subtitle = "QT facets as before; extra facets compare BL vs first AH code 1 (new spot) and BL vs first AH code 2 (shrinking)",
+    x = NULL, y = "Stress score"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 15, hjust = 1),
+        plot.margin = margin(t = 10, r = 28, b = 10, l = 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.20))) +
+  coord_cartesian(clip = "off")
+
+p
+```
+
+
+```{r test}
+# ---- AH SECTION (v2) -----------------------------------------------------
+
+library(dplyr); library(stringr); library(tidyr)
+
+q12_txt   <- "Do you have vitiligo?"
+q1_txt_ah <- "Have you noticed any new white spots on your skin that you think can be vitiligo or improvement (repigmentation) of your vitiligo?"
+q1_txt_std<- "Have you noticed any new white spots on your skin that you think could be vitiligo?"
+
+norm_stype <- function(x){
+  x <- str_to_upper(str_squish(as.character(x)))
+  recode(x,
+    "BASELINE"="BL","QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT","QTR"="QT",
+    "AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+    .default = x
+  )
+}
+norm_yesno <- function(x){
+  s <- str_to_lower(str_squish(as.character(x)))
+  case_when(
+    str_detect(s, "^(yes|y|true|1)$") ~ "Yes",
+    str_detect(s, "^(no|n|false|0)$") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+v <- vitiligo_df %>% mutate(survey_type = norm_stype(survey_type),
+                            recorded_date = as.Date(recorded_date))
+
+# Q12 gate
+q12_yes_by_date <- v %>%
+  filter(question_readable == q12_txt) %>%
+  transmute(patient_id, recorded_date, has_vitiligo = norm_yesno(answer_clean)) %>%
+  filter(has_vitiligo == "Yes") %>%
+  distinct(patient_id, recorded_date, .keep_all = TRUE)
+
+bl_q12_yes <- v %>%
+  filter(question_readable == q12_txt, survey_type == "BL") %>%
+  transmute(patient_id, bl_vit_yes = norm_yesno(answer_clean) == "Yes") %>%
+  distinct(patient_id, bl_vit_yes)
+
+# Stress (normalize types to include AH)
+stress_on_date <- stress_df %>%
+  transmute(
+    patient_id, recorded_date,
+    survey_type = recode(str_to_upper(str_squish(survey_type)),
+                         "BASELINE"="BL","QUARTERLY"="QT","QUARTERLY CHECK-IN"="QT","QTR"="QT",
+                         "AD-HOC"="AH","AD HOC"="AH","ADHOC"="AH",
+                         .default = str_to_upper(survey_type)),
+    stress_score
+  )
+
+# AH Q1 parser: support both AH phrasings; prefer numeric codes if present
+ah_events <- v %>%
+  filter(survey_type == "AH",
+         str_detect(question_readable, fixed("Have you noticed any new white spots", ignore_case = TRUE))) %>%
+  transmute(patient_id, recorded_date, survey_type,
+            # try to parse a leading numeric code (1=new, 2=shrinking)
+            code = suppressWarnings(as.integer(str_extract(answer_clean, "^\\d+"))),
+            # if no code but it's the standard wording, fall back to Yes/No
+            yn   = if_else(question_readable == q1_txt_std, norm_yesno(answer_clean), NA_character_))
+
+# same-day join to stress + Q12 gate
+ah_with_stress <- ah_events %>%
+  inner_join(stress_on_date %>% filter(survey_type == "AH"),
+             by = c("patient_id","recorded_date","survey_type")) %>%
+  left_join(q12_yes_by_date, by = c("patient_id","recorded_date")) %>%
+  left_join(bl_q12_yes,      by = "patient_id") %>%
+  filter(!is.na(has_vitiligo) | bl_vit_yes)
+
+# first AH code=1 day
+ah1_first <- ah_with_stress %>%
+  filter(code == 1 | (is.na(code) & yn == "Yes")) %>%   # allow std Yes as "new spot" if no code
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(ah_code1_first = first(stress_score), .groups = "drop")
+
+# first AH code=2 day (shrinking) — only from coded AH
+ah2_first <- ah_with_stress %>%
+  filter(code == 2) %>%
+  group_by(patient_id) %>%
+  arrange(recorded_date, .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  summarise(ah_code2_first = first(stress_score), .groups = "drop")
+
+# BL baseline stress you already computed (bl_stress). Join and build cohorts:
+dat_ah <- bl_stress %>%
+  left_join(ah1_first, by = "patient_id") %>%
+  left_join(ah2_first, by = "patient_id")
+
+cohort_E <- dat_ah %>%
+  filter(is.finite(bl_stress), is.finite(ah_code1_first)) %>%
+  transmute(patient_id, cohort = "BL → AH code 1",
+            phase1 = "BL (baseline)", s1 = bl_stress,
+            phase2 = "AH (code 1: new spot)", s2 = ah_code1_first)
+
+cohort_F <- dat_ah %>%
+  filter(is.finite(bl_stress), is.finite(ah_code2_first)) %>%
+  transmute(patient_id, cohort = "BL → AH code 2",
+            phase1 = "BL (baseline)", s1 = bl_stress,
+            phase2 = "AH (code 2: shrinking)", s2 = ah_code2_first)
+
+# long format; force character for safe binding
+paired_long_extra <- bind_rows(cohort_E, cohort_F) %>%
+  pivot_longer(c(s1, s2), names_to = "slot", values_to = "stress") %>%
+  mutate(
+    phase = dplyr::if_else(slot == "s1", phase1, phase2, missing = NA_character_),
+    phase = as.character(phase)
+  ) %>%
+  select(patient_id, cohort, phase, stress) %>%
+  filter(is.finite(stress))
+
+# if nothing survived, you'll get 0 rows here:
+# paired_long_extra %>% count(cohort)
 ```
