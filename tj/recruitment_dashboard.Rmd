@@ -37,8 +37,8 @@ if (!requireNamespace("here", quietly = TRUE)) {
 here::i_am("tj/phase1_api_call_v2.R")
 
 # source in Phase I and II REDCap data via separate API calls
-source(here::here("tj/join_data.R"))
-source(here::here("tj/pivot_race_v2.R"))
+source(here::here("tj", "join_data.R"))
+source(here::here("tj", "pivot_race_v2.R"))
 
 
 

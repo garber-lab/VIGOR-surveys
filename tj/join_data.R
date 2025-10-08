@@ -44,8 +44,8 @@ last_updated_fmt <- str_glue("Accurate as of {date(last_updated_est)} @ {hour(la
 here::i_am("tj/phase1_api_call_v2.R")
 
 # source in Phase I and II REDCap data via separate API calls
-source(here::here("tj/phase1_api_call_v2.R"))
-source(here::here("tj/phase2_api_call.R"))
+source(here::here("tj", "phase1_api_call_v2.R"))
+source(here::here("tj", "phase2_api_call.R"))
 
 
 # join Phase 1 data onto Phase 2 data using Referral ID as the join key
