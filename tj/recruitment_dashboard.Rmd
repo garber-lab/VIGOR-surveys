@@ -120,7 +120,7 @@ p1_all <- bind_rows(
 
 ```{r include=FALSE}
 # read in Phase 1 email list 
-p1_emails <- read_excel("../data/phase1/Phase_I_Email_Clicks (1).xlsx")
+p1_emails <- read_excel(here::here("tj/data/Phase_I_Email_Clicks (1).xlsx"))
 
 # indicate which people are KNOWN to have come from emails
 p1_all <- p1_all %>%
@@ -1547,7 +1547,7 @@ ggsave(
 
 ```{r include=FALSE}
 # read in Phase 1 engagement scores
-p1_eng <- read_csv("../data/phase1/phase-1-engagement-score-export-10.11.csv")
+p1_eng <- read_csv(here::here("tj/data/phase-1-engagement-score-export-10.11.csv"))
 
 # normalize strings
 p1_eng <- p1_eng %>%
@@ -3975,7 +3975,7 @@ Evaluate the effectiveness of every weekly Phase 1 -> 2 transition
 # read in every contact list from each weekly email blast
 
 # init. file constants
-base_dir <- "../data/contact_list/phase2_subj_selection/"
+base_dir <- "~/U01_PROSPECTIVE_VITILIGO/data/contact_list/phase2_subj_selection/"
 base_file <- "new_recruiters_"
 curr_file_base <- str_subset(list.files(base_dir), base_file)
 correct_file_base <- str_subset(list.files(base_dir), "correct")
