@@ -1,5 +1,6 @@
 # Credendials
 foundry_credentials.R
+redcap_credentials.R
 
 # History files
 .Rhistory
