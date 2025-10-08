@@ -54,3 +54,6 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Foundry Analysis Notebook with sensitive info
+tj/foundry_api_v2.Rmd
