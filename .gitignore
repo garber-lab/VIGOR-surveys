@@ -2,6 +2,9 @@
 foundry_credentials.R
 redcap_credentials.R
 
+# TJ's Data Files
+tj/data/*
+
 # History files
 .Rhistory
 .Rapp.history
